@@ -27,3 +27,6 @@ dist/
 start.ps1
 start.sh
 stop.ps1
+
+# Claude Code 本地配置（skill 等，个人环境不入库）
+.claude/
