@@ -1,0 +1,8 @@
+{
+  "rule_iri": "urn:rule:manual:technical_standard_ref",
+  "rule_name": "技术标准引用完整性",
+  "severity": "MEDIUM",
+  "aggregation": "all",
+  "expression": "审查合同中是否明确引用技术标准或验收标准（如 GB/ISO/行业标准号、'技术标准'、'验收标准'、'规格参数'、'检验检测标准'）并对标准不符时的验收处理作出约定。判定依据是整个合同文本。适用性（applicable）判定是第一步、优先于 pass 判定：仅当合同中出现具体标准号或上述'标准'类术语时才适用（applicable=true）；合同只有'验收合格'、'验收合格后付款'、'验收通过'这类一般性表述、没有出现任何标准号或'标准/规格/检测'类术语的，一律设 applicable=false，不得判为适用，也不得据此判违约。",
+  "description": "验收 B8：规则不适用（applicable=false）→ SKIPPED"
+}

@@ -1,0 +1,126 @@
+# 示例合同本体（对应 solution.md §6）
+# 中文合同 → 标准文本抽取的领域模型。owlready2 加载（经 rdflib 转 N-Triples）；
+# 后续可替换真实本体。命名空间：http://example.org/contract#
+#
+# 约束编码约定（owlready2 0.51 实测可读）：
+#   - 必填/基数：Contract/Party/… 的 rdfs:subClassOf owl:Restriction（minCardinality）
+#   - 枚举：属性 rdfs:range 内联匿名 datatype + owl:oneOf
+#   - 数值范围/格式：rdfs:range 内联匿名 datatype + owl:onDatatype + owl:withRestrictions
+#   - 命名 datatype + owl:equivalentClass 不被 owlready2 解析，故全部内联
+
+@prefix :      <http://example.org/contract#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+<http://example.org/contract> a owl:Ontology .
+
+# =====================================================================
+# 1. 类层次
+#    Contract（合同）— hasParty→Party / hasItem→ContractItem / hasClause→Clause
+# =====================================================================
+
+:Contract a owl:Class ;
+    rdfs:label "合同"@zh ;
+    # ---- 必填数据属性（minCardinality 1）----
+    rdfs:subClassOf
+        [ a owl:Restriction ; owl:onProperty :contractTitle  ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :contractType   ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :effectiveDate  ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :totalAmount    ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :currency       ; owl:minCardinality 1 ] ,
+        # ---- 对象属性基数：hasParty 1..*，其余 0..* ----
+        [ a owl:Restriction ; owl:onProperty :hasParty       ; owl:minCardinality 1 ] .
+
+:Party a owl:Class ;
+    rdfs:label "当事人"@zh ;
+    rdfs:subClassOf
+        [ a owl:Restriction ; owl:onProperty :partyRole   ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :partyName   ; owl:minCardinality 1 ] .
+
+:ContractItem a owl:Class ;
+    rdfs:label "合同标的"@zh ;
+    rdfs:subClassOf
+        [ a owl:Restriction ; owl:onProperty :itemName ; owl:minCardinality 1 ] .
+
+:Clause a owl:Class ;
+    rdfs:label "合同条款"@zh ;
+    rdfs:subClassOf
+        [ a owl:Restriction ; owl:onProperty :clauseType ; owl:minCardinality 1 ] ,
+        [ a owl:Restriction ; owl:onProperty :clauseText ; owl:minCardinality 1 ] .
+
+# =====================================================================
+# 2. 数据属性（DatatypeProperty）
+# =====================================================================
+
+# ---- Contract 数据属性 ----
+:contractTitle a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:string .
+:contractNo a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:string .
+:contractType a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "采购" "销售" "服务" "劳务" "租赁" "合作" "其他" ) ] .
+:signedDate a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:date .
+:effectiveDate a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:date .
+:terminationDate a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:date .
+:signingPlace a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:string .
+:totalAmount a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+:currency a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "CNY" "USD" "EUR" "JPY" "HKD" ) ] .
+:status a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "执行中" "已完成" "已解除" "已终止" "其他" ) ] .
+:depositAmount a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+:depositType a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "履约保证金" "质量保证金" "投标保证金" "预付款保证金" "其他" ) ] .
+:depositRefundCondition a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:string .
+:taxRate a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+:taxInclusive a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:boolean .
+:invoiceType a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "增值税专用发票" "增值税普通发票" "电子发票" "其他" ) ] .
+:invoiceRequirements a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Contract ; rdfs:range xsd:string .
+
+# ---- Party 数据属性 ----
+:partyRole a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "甲方" "乙方" "丙方" ) ] .
+:partyName a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ; rdfs:range xsd:string .
+:unifiedSocialCreditCode a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:string ;
+                 owl:withRestrictions ( [ xsd:pattern "[0-9A-Z]{18}" ] ) ] .
+:legalRepresentative a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ; rdfs:range xsd:string .
+:address a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ; rdfs:range xsd:string .
+:contact a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Party ; rdfs:range xsd:string .
+
+# ---- Clause 数据属性 ----
+:clauseType a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Clause ;
+    rdfs:range [ a rdfs:Datatype ; owl:oneOf ( "付款" "交付" "违约责任" "保密" "知识产权" "争议解决" "不可抗力" "解除" "通知" "其他" ) ] .
+:clauseTitle a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Clause ; rdfs:range xsd:string .
+:clauseText a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :Clause ; rdfs:range xsd:string .
+
+# ---- ContractItem 数据属性 ----
+:itemName a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :ContractItem ; rdfs:range xsd:string .
+# B2/B10 修复：标的数量/单价/金额不得为负（本体加 minInclusive 0，生成 min 规则抓负值）
+:quantity a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :ContractItem ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+:unitPrice a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :ContractItem ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+:itemAmount a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain :ContractItem ;
+    rdfs:range [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ;
+                 owl:withRestrictions ( [ xsd:minInclusive "0"^^xsd:decimal ] ) ] .
+
+# =====================================================================
+# 3. 对象属性（ObjectProperty）
+# =====================================================================
+
+:hasParty a owl:ObjectProperty ; rdfs:domain :Contract ; rdfs:range :Party ;
+    rdfs:label "当事人"@zh .
+:hasItem a owl:ObjectProperty ; rdfs:domain :Contract ; rdfs:range :ContractItem ;
+    rdfs:label "合同标的"@zh .
+:hasClause a owl:ObjectProperty ; rdfs:domain :Contract ; rdfs:range :Clause ;
+    rdfs:label "合同条款"@zh .

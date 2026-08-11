@@ -1,0 +1,8 @@
+{
+  "rule_iri": "urn:rule:manual:missing_breach_clause",
+  "rule_name": "违约责任条款缺失或不完整",
+  "severity": "HIGH",
+  "aggregation": "all",
+  "expression": "检查本合同是否具备明确的违约责任条款。判定依据是整个合同文本：只要原文明确了违约金数额、违约金比例（如'合同总价的10%'）、赔偿范围、责任承担方式中的任一具体内容，即视为具备明确违约责任条款，判定通过（pass=true）；只有当整个合同完全没有违约/赔偿/责任承担相关约定，或仅有'任何一方违约应赔偿损失'这类无任何具体化的泛泛表述时，才判定违约（pass=false）。",
+  "description": "验收 B6：缺违约条款 → 语义 FAIL（evidence 为原文精确子串）"
+}

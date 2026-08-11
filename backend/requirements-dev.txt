@@ -1,0 +1,3 @@
+# dev/test deps: install with main deps first (-r references requirements.txt)
+-r requirements.txt
+pytest==9.1.1

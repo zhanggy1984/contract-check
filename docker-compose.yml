@@ -1,0 +1,69 @@
+# 整套部署（T4.5）：mysql + backend + frontend(nginx)
+# 一键启动：docker compose up -d --build → http://localhost（前端）/ http://localhost:8001（后端 API）
+# DB 凭据单一事实源：项目根 .env（M3），mysql 与 backend 均以 ${...} 引用
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: contract-check-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      # M6：开发用暴露宿主 3306（宿主工具/宿主 dev 后端直连）；生产环境请移除该映射
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: contract-check-backend
+    env_file: ./backend/.env            # DEEPSEEK_API_KEY 等（本地文件，不入镜像）
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TASK_TIMEOUT_SECONDS: "1800"      # S2：首次 OCR 模型下载预留，避免误超时
+    ports:
+      - "8001:8000"                     # 宿主直连后端 API（8000 被宿主 dev 占用）
+    volumes:
+      - upload_data:/app/data/uploads   # 上传原件持久化
+      - parsed_data:/app/data/parsed    # 解析文本持久化
+    healthcheck:                        # M5：backend 就绪才让 frontend 反代
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 2g                       # M5：OCR+LLM 高内存，限制防拖垮宿主
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: contract-check-frontend
+    ports:
+      - "80:80"
+    healthcheck:                        # M5（用 127.0.0.1：localhost 在 alpine 解析到 ::1，nginx 只监听 IPv4）
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  upload_data:
+  parsed_data:

@@ -1,0 +1,12 @@
+# rule_iri: urn:rule:manual:termination_after_effective
+# rule_name: 终止日期不得早于生效日期
+# severity: HIGH
+# concept_iri: http://example.org/contract#Contract
+# description: 合同终止日期必须晚于或等于生效日期（B5 验收：终止早于生效即逻辑错误）
+
+ASK {
+  ?s a <http://example.org/contract#Contract> .
+  ?s <http://example.org/contract#effectiveDate> ?eff .
+  ?s <http://example.org/contract#terminationDate> ?term .
+  FILTER (?term < ?eff)
+}

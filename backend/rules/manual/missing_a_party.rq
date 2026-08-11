@@ -1,0 +1,14 @@
+# rule_iri: urn:rule:manual:missing_a_party
+# rule_name: 合同缺少甲方主体
+# severity: HIGH
+# concept_iri: http://example.org/contract#Contract
+# description: 合同必须至少包含一个 partyRole 为"甲方"的当事人（minCardinality 只能保证 hasParty≥1，"甲方乙方各一"需按语义判定，归人工规则）
+
+ASK {
+  ?s a <http://example.org/contract#Contract> .
+  FILTER NOT EXISTS {
+    ?s <http://example.org/contract#hasParty> ?pa .
+    ?pa <http://example.org/contract#partyRole> ?role .
+    FILTER (str(?role) = "甲方")
+  }
+}

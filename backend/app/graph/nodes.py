@@ -1,0 +1,304 @@
+"""图节点：解析→抽取→确定性校验→待审核→应用审核→定稿。
+
+语义校验节点在 Phase 3 接入；await_human_review 保持纯节点。
+"""
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+
+from langgraph.types import interrupt
+
+from app.common.constants import ExtractionStatus, RuleResult, RuleType, TaskStatus, ViolationStatus
+from app.common.errors import TaskCancelledError
+from app.config import settings
+from app.db.models import CheckTask, Violation
+from app.db.session import SessionLocal
+from app.graph.state import TaskState
+from app.llm.extractor import extract_contract
+from app.ocr.ocr_service import OcrService
+from app.ontology.loader import load_ontology, register_version
+from app.ontology.rdf_converter import JsonToRdfConverter
+from app.ontology.schema_mapper import build_extraction_schema
+from app.parser.segment_splitter import split_segments
+from app.service.rule_service import get_enabled_rules, sync_rules
+from app.validation.persist import RuleOutcome, persist_results
+from app.validation.semantic_evaluator import SemanticEvaluator
+from app.validation.sparql_executor import SparqlExecutor, build_graph
+
+PARSED_DIR = Path("data/parsed")
+
+# 规则种类从 rule_iri 解析：urn:rule:{kind}:...（本体生成 required/enum/min/pattern，人工 manual）
+_RULE_KIND_RE = re.compile(r"^urn:rule:([a-z]+):")
+
+
+def _rule_kind(rule_iri: str | None) -> str | None:
+    """规则种类（用于 INCOMPLETE 时按依赖分派）。rule_iri 取不到种类时返回 None。"""
+    if not rule_iri:
+        return None
+    m = _RULE_KIND_RE.match(rule_iri)
+    return m.group(1) if m else None
+
+
+def parse_node(state: TaskState) -> dict:
+    """读取已解析文本并置 PARSING；扫描件（无文本层）在此触发 OCR（T4.1）；CANCELLED 时短路。
+
+    OCR 失败（模型缺失/识别异常）抛异常 → 任务 FAILED 带提示，不做"空文本进抽取"。
+    """
+    with SessionLocal() as db:
+        task = db.get(CheckTask, state["task_id"])
+        if task is None:
+            raise RuntimeError(f"任务 {state['task_id']} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        task.status = TaskStatus.PARSING.value
+        task.progress = 20
+        db.commit()
+        cf = task.contract_file
+        sha = cf.sha256
+        need_ocr = bool(cf.has_scanned) and not cf.ocr_applied
+        storage_path = cf.storage_path
+
+    txt = PARSED_DIR / f"{sha}.txt"
+    text = txt.read_text(encoding="utf-8") if txt.exists() else ""
+    if need_ocr:
+        text = OcrService.ocr_pdf(storage_path)
+        txt.write_text(text, encoding="utf-8")
+        with SessionLocal() as db:
+            db.get(CheckTask, state["task_id"]).contract_file.ocr_applied = True
+            db.commit()
+    return {"parsed_text": text}
+
+
+def extract_node(state: TaskState) -> dict:
+    """LLM 抽取 + RDF 转换 + segments 恒落库（T1.4/T1.5）。
+
+    空结果（FAILED）→ 抛异常走失败分支；部分缺失（INCOMPLETE）→ 照常落库待人工。
+    """
+    task_id = state["task_id"]
+    with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        if task is None:
+            raise RuntimeError(f"任务 {task_id} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        task.status = TaskStatus.EXTRACTING.value
+        task.progress = 40
+        task.llm_model = settings.deepseek_model
+        task.ontology_version_id = register_version(db)
+        db.commit()
+
+    schema = build_extraction_schema(load_ontology())
+    result = extract_contract(state["parsed_text"], schema)
+    if result.status == ExtractionStatus.FAILED.value:
+        raise RuntimeError(f"抽取失败: {result.error}")
+
+    segments = split_segments(state["parsed_text"])
+    rdf_nt = ""
+    if result.std_json:
+        rdf_nt = JsonToRdfConverter(schema).convert(result.std_json, task_id)
+
+    with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        task.extraction_status = result.status
+        task.standard_json = json.dumps(result.std_json, ensure_ascii=False) if result.std_json else None
+        task.segments_json = json.dumps(segments, ensure_ascii=False)
+        task.extraction_rdf = rdf_nt or None
+        task.extraction_conflicts = json.dumps(result.conflicts, ensure_ascii=False) if result.conflicts else None
+        task.progress = 60
+        db.commit()
+
+    return {
+        "extraction_json": result.std_json,
+        "extraction_status": result.status,
+        "extraction_rdf": rdf_nt,
+        "segments": segments,
+    }
+
+
+def validate_deterministic(state: TaskState) -> dict:
+    """确定性校验（T2.2 改造）：SPARQL 规则执行，只算不落库。
+
+    D2 精化（B1/B2/B3 修复）：抽取 INCOMPLETE 时不再全量跳过——
+    不依赖数据完整性的规则照跑（required 抓缺失、manual 结构逻辑），
+    依赖完整数据的约束规则（enum/min/pattern）跳过防误报（部分数据判枚举/下限不可靠）。
+    RDF 完全缺失时全部 SKIPPED（T1.5 防御：部分数据不进假阳性洪水）。
+    结果以纯 dict 挂 state（det_outcomes），供 persist 节点统一落库（checkpointer 可序列化）。
+    """
+    task_id = state["task_id"]
+    with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        if task is None:
+            raise RuntimeError(f"任务 {task_id} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        task.status = TaskStatus.VALIDATING.value
+        task.progress = 70
+        db.commit()
+        ovid = task.ontology_version_id
+        incomplete = task.extraction_status == ExtractionStatus.INCOMPLETE.value
+        rdf_nt = task.extraction_rdf
+        sync_rules(db, ovid)                 # 保证规则集最新（表达式/严重级别）
+        rules = [r for r in get_enabled_rules(db, ovid)
+                 if r.rule_type == RuleType.DETERMINISTIC.value]
+        if incomplete:
+            runnable, skippable = [], []
+            for r in rules:
+                (runnable if _rule_kind(r.rule_iri) in ("required", "manual") else skippable).append(r)
+        else:
+            runnable, skippable = rules, []
+
+    graph = build_graph(rdf_nt) if runnable else None
+    executor = SparqlExecutor()
+    outcomes: list[dict] = []
+    for rule in skippable:
+        outcomes.append({"rule_id": rule.id, "result": RuleResult.SKIPPED.value, "subjects": []})
+    for rule in runnable:
+        res = executor.run(graph, rule)
+        if res.passed:
+            result = RuleResult.PASS.value
+        elif res.subjects:
+            result = RuleResult.FAIL.value
+        else:
+            result = RuleResult.SKIPPED.value   # 空图无反例可判（防御）
+        outcomes.append({"rule_id": rule.id, "result": result, "subjects": res.subjects})
+    return {"det_outcomes": outcomes}
+
+
+def validate_semantic(state: TaskState) -> dict:
+    """语义校验（T3.2）：SEMANTIC 规则按段批跑，只算不落库。
+
+    基于原文 segments（不受抽取 INCOMPLETE 影响）；segments 缺失时全部 SKIPPED 防御。
+    """
+    task_id = state["task_id"]
+    with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        if task is None:
+            raise RuntimeError(f"任务 {task_id} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        task.progress = 78
+        db.commit()
+        ovid = task.ontology_version_id
+        rules = [r for r in get_enabled_rules(db, ovid)
+                 if r.rule_type == RuleType.SEMANTIC.value]
+        segments = json.loads(task.segments_json) if task.segments_json else []
+
+    if not rules:
+        return {"sem_outcomes": []}
+    if not segments:
+        # 无分段原文可评 = 评估失败（而非规则不适用），标 LOW 供审计识别
+        return {"sem_outcomes": [
+            {"rule_id": r.id, "result": RuleResult.SKIPPED.value, "confidence": "LOW"}
+            for r in rules
+        ]}
+    evaluator = SemanticEvaluator()
+    results = evaluator.evaluate(
+        segments,
+        [{"id": r.id, "rule_iri": r.rule_iri, "rule_name": r.rule_name,
+          "expression": r.expression, "aggregation": r.aggregation or "any"} for r in rules],
+    )
+    return {"sem_outcomes": [
+        {"rule_id": o.rule_id, "result": o.result, "message": o.message,
+         "evidence_text": o.evidence_text, "segment_ref": o.segment_ref,
+         "confidence": o.confidence}
+        for o in results
+    ]}
+
+
+def persist_node(state: TaskState) -> dict:
+    """校验结果统一落库（T2.3/T3.2）：确定性 + 语义合并，单事务幂等写 rule_check_result + violation。"""
+    task_id = state["task_id"]
+    det = state.get("det_outcomes") or []
+    sem = state.get("sem_outcomes") or []
+    with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        if task is None:
+            raise RuntimeError(f"任务 {task_id} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        rules = {r.id: r for r in get_enabled_rules(db, task.ontology_version_id)}
+        outcomes: list[RuleOutcome] = []
+        for o in det:
+            rule = rules.get(o["rule_id"])
+            if rule is not None:
+                outcomes.append(RuleOutcome(rule, o["result"], o.get("subjects") or []))
+        for o in sem:
+            rule = rules.get(o["rule_id"])
+            if rule is not None:
+                outcomes.append(RuleOutcome(
+                    rule, o["result"], [],
+                    message=o.get("message"),
+                    segment_ref=o.get("segment_ref"),
+                    evidence_text=o.get("evidence_text"),
+                    confidence=o.get("confidence") or "HIGH",
+                ))
+        info = persist_results(db, task_id, outcomes)
+    return {"violations_count": info["violations"], "rule_results_count": info["rows"]}
+
+
+def mark_waiting(state: TaskState) -> dict:
+    """校验结果就绪，进入待人工审核（WAITING_REVIEW 由本节点置，不在纯节点内写状态）。"""
+    with SessionLocal() as db:
+        task = db.get(CheckTask, state["task_id"])
+        if task is None:
+            raise RuntimeError(f"任务 {state['task_id']} 不存在")
+        if task.status == TaskStatus.CANCELLED.value:
+            raise TaskCancelledError("任务已取消")
+        task.status = TaskStatus.WAITING_REVIEW.value
+        task.progress = 100
+        db.commit()
+    return {}
+
+
+def await_review(state: TaskState) -> dict:
+    """纯节点：仅 interrupt，无副作用（resume 时从头重跑无影响）。"""
+    decision = interrupt({"task_id": state["task_id"]})
+    return {"reviews": decision}
+
+
+def apply_reviews(state: TaskState) -> dict:
+    """把人工审核结果写入 violation（确认/误报），resume 时执行。
+
+    后端不信任前端载荷：action 仅接受 CONFIRMED/FALSE_POSITIVE，violation_id
+    不可转换或不属于本任务则静默跳过（resume 失败不应搞崩任务）。
+    """
+    raw = state.get("reviews") or []
+    if isinstance(raw, dict):        # resume 载荷可能是 {reviews:[...]} 包装
+        raw = raw.get("reviews") or []
+    valid_actions = {ViolationStatus.CONFIRMED.value, ViolationStatus.FALSE_POSITIVE.value}
+    task_id = state["task_id"]
+    with SessionLocal() as db:
+        for r in raw:
+            action = r.get("action")
+            if action not in valid_actions:
+                continue
+            try:
+                vid = int(r["violation_id"])
+            except (TypeError, ValueError):
+                continue
+            v = db.get(Violation, vid)
+            if v is not None and v.task_id == task_id:
+                v.status = action
+                v.confirm_user = r.get("confirm_user")
+                v.confirm_time = datetime.now()
+        db.commit()
+    return {}
+
+
+def finalize(state: TaskState) -> dict:
+    """终态由 violation 确认结果决定（修复：人工确认的异常不应 SUCCESS）。
+
+    有人工确认（CONFIRMED）的异常 → FAILED（验证失败）；全部误报或零异常 → SUCCESS
+    （验证通过）。resume 后 apply_reviews 已把本任务 UNCONFIRMED 全量转成
+    CONFIRMED/FALSE_POSITIVE，此处按 CONFIRMED 存在与否定终态即可。
+    """
+    with SessionLocal() as db:
+        task = db.get(CheckTask, state["task_id"])
+        has_confirmed = db.query(Violation.id).filter_by(
+            task_id=state["task_id"], status=ViolationStatus.CONFIRMED.value
+        ).first()
+        task.status = TaskStatus.FAILED.value if has_confirmed else TaskStatus.SUCCESS.value
+        task.progress = 100
+        db.commit()
+    return {}

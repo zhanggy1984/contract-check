@@ -1,0 +1,8 @@
+{
+  "rule_iri": "urn:rule:manual:unbalanced_obligations",
+  "rule_name": "权利义务不对等",
+  "severity": "MEDIUM",
+  "aggregation": "all",
+  "expression": "审查合同中双方权利义务是否对等。判定依据是整个合同文本（不是单个段落）：检查是否存在明显的权利与义务失衡，如一方仅有义务而无对应权利、违约责任仅单方向约定、或解除权/索赔权/免责条款仅由一方享有。若合同明确了双方的权利义务且无明显失衡，判定通过（pass=true）；仅当存在上述明显不对等时判定违约（pass=false）；若合同基本没有权利义务内容，设 applicable=false。",
+  "description": "验收 B7：权利义务不对等 → 语义 FAIL（low-confidence 标注）"
+}

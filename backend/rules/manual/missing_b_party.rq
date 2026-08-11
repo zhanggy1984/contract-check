@@ -1,0 +1,14 @@
+# rule_iri: urn:rule:manual:missing_b_party
+# rule_name: 合同缺少乙方主体
+# severity: HIGH
+# concept_iri: http://example.org/contract#Contract
+# description: 合同必须至少包含一个 partyRole 为"乙方"的当事人（业务侧：缺乙方即单方合同，不可执行）
+
+ASK {
+  ?s a <http://example.org/contract#Contract> .
+  FILTER NOT EXISTS {
+    ?s <http://example.org/contract#hasParty> ?pb .
+    ?pb <http://example.org/contract#partyRole> ?role .
+    FILTER (str(?role) = "乙方")
+  }
+}
