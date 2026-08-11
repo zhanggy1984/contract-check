@@ -11,6 +11,6 @@ export const getViolations = (params) => axios.get('/api/violations', { params }
 export const listRules = (params) => axios.get('/api/rules', { params }).then((r) => r.data)
 export const createRule = (body) => axios.post('/api/rules', body).then((r) => r.data)
 export const updateRule = (id, body) => axios.put(`/api/rules/${id}`, body).then((r) => r.data)
-export const disableRule = (id) => axios.delete(`/api/rules/${id}`).then((r) => r.data)
+export const deleteRule = (id) => axios.delete(`/api/rules/${id}`).then((r) => r.data)
 export const dryRunRule = (id, taskId) =>
   axios.post(`/api/rules/${id}/dry-run`, { task_id: taskId }).then((r) => r.data)

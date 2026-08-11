@@ -30,3 +30,6 @@ stop.ps1
 
 # Claude Code 本地配置（skill 等，个人环境不入库）
 .claude/
+
+# codegraph 本地代码索引（工具产物，不入库）
+.codegraph/

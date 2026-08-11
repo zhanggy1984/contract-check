@@ -23,6 +23,53 @@ from app.ontology.schema_mapper import (
 # 人工规则目录：backend/rules/manual/*.rq
 MANUAL_RULES_DIR = Path(__file__).resolve().parents[2] / "rules" / "manual"
 
+# 本体短名 → 大白话（合同业务法律术语）。规则名称面向业务用户展示，
+# 本体 IRI 短名（Contract/clauseType…）用户看不懂，生成规则时统一替换。
+CLASS_LABELS = {
+    "Contract": "合同",
+    "Party": "当事人",
+    "ContractItem": "合同标的",
+    "Clause": "合同条款",
+}
+PROP_LABELS = {
+    # Contract 数据属性
+    "contractTitle": "合同名称", "contractNo": "合同编号", "contractType": "合同类型",
+    "signedDate": "签订日期", "effectiveDate": "生效日期", "terminationDate": "终止日期",
+    "signingPlace": "签订地点", "totalAmount": "合同总金额", "currency": "币种",
+    "status": "合同状态", "depositAmount": "保证金金额", "depositType": "保证金类型",
+    "depositRefundCondition": "保证金退还条件", "taxRate": "税率", "taxInclusive": "是否含税",
+    "invoiceType": "发票类型", "invoiceRequirements": "发票要求",
+    # Party 数据属性
+    "partyRole": "当事人角色", "partyName": "当事人名称",
+    "unifiedSocialCreditCode": "统一社会信用代码", "legalRepresentative": "法定代表人",
+    "address": "地址", "contact": "联系方式",
+    # Clause 数据属性
+    "clauseType": "条款类型", "clauseTitle": "条款标题", "clauseText": "条款内容",
+    # ContractItem 数据属性
+    "itemName": "标的名称", "quantity": "数量", "unitPrice": "单价", "itemAmount": "标的金额",
+    # 对象属性
+    "hasParty": "当事人", "hasItem": "合同标的", "hasClause": "合同条款",
+}
+# pattern 正则 → 大白话说明（无映射则回退显示正则原文）
+PATTERN_HINTS = {
+    "unifiedSocialCreditCode": "18位数字或大写字母",
+}
+
+
+def _cls_label(name: str) -> str:
+    """类短名 → 大白话（未收录则回退短名，换真实本体时不崩）。"""
+    return CLASS_LABELS.get(name, name)
+
+
+def _prop_label(name: str) -> str:
+    """属性短名 → 大白话（未收录则回退短名）。"""
+    return PROP_LABELS.get(name, name)
+
+
+def _fmt_num(v) -> str:
+    """数值下限文案：整数显示整数（0.0 → 0）。"""
+    return str(int(v)) if float(v).is_integer() else str(v)
+
 
 def _iri(name: str) -> str:
     return f"<{ONTOLOGY_IRI}{name}>"
@@ -113,7 +160,7 @@ def generate_rules(onto) -> list[dict]:
                         cls.name, pname, "required",
                         _sparql_required(cls.name, pname),
                         Severity.HIGH.value,
-                        f"{cls.name} 至少关联一个 {prop.range[0].name}（{pname}）",
+                        f"{_cls_label(cls.name)}必须至少包含一个{_cls_label(prop.range[0].name)}",
                     ))
                 continue
             rng = prop.range[0] if prop.range else None
@@ -125,7 +172,7 @@ def generate_rules(onto) -> list[dict]:
                     cls.name, pname, "required",
                     _sparql_required(cls.name, pname),
                     Severity.HIGH.value,
-                    f"{cls.name} 缺少必填属性 {pname}",
+                    f"{_cls_label(cls.name)}缺少必填信息：{_prop_label(pname)}",
                 ))
             # 枚举越界
             enums = _enum_values(rng)
@@ -134,7 +181,7 @@ def generate_rules(onto) -> list[dict]:
                     cls.name, pname, "enum",
                     _sparql_enum(cls.name, pname, enums),
                     Severity.MEDIUM.value,
-                    f"{cls.name}.{pname} 必须为枚举值之一：{'/'.join(enums)}",
+                    f"{_prop_label(pname)}必须为以下之一：{'/'.join(enums)}",
                 ))
                 continue
             # 数值下限 / 格式
@@ -144,7 +191,7 @@ def generate_rules(onto) -> list[dict]:
                     cls.name, pname, "min",
                     _sparql_min(cls.name, pname, min_v),
                     Severity.MEDIUM.value,
-                    f"{cls.name}.{pname} 不得小于 {float(min_v)}",
+                    f"{_prop_label(pname)}不得小于 {_fmt_num(min_v)}",
                 ))
             pattern = getattr(rng, "pattern", None)
             if pattern:
@@ -152,7 +199,7 @@ def generate_rules(onto) -> list[dict]:
                     cls.name, pname, "pattern",
                     _sparql_pattern(cls.name, pname, pattern),
                     Severity.MEDIUM.value,
-                    f"{cls.name}.{pname} 必须匹配 {pattern}",
+                    f"{_prop_label(pname)}格式不符合要求（正确格式：{PATTERN_HINTS.get(pname, pattern)}）",
                 ))
     return rules
 

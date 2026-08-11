@@ -32,12 +32,13 @@
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" link type="warning" @click="openDryRun(row)">试跑</el-button>
-          <!-- 本体规则由 OWL 约束生成，不可人工失效（后端 disable 仅人工规则）；只对人工规则显示启停 -->
-          <el-button v-if="row.source === 'MANUAL' && row.enabled" size="small" link type="danger" @click="disable(row)">失效</el-button>
+          <!-- 人工规则支持启停（软删）与彻底删除；本体规则只读，仅可试跑 -->
+          <el-button v-if="row.source === 'MANUAL' && row.enabled" size="small" link type="warning" @click="disable(row)">失效</el-button>
           <el-button v-else-if="row.source === 'MANUAL'" size="small" link type="success" @click="enable(row)">启用</el-button>
           <el-tooltip v-else content="本体自动生成的规则不可失效" placement="top">
             <el-button size="small" link type="info" disabled>失效</el-button>
           </el-tooltip>
+          <el-button v-if="row.source === 'MANUAL'" size="small" link type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -56,15 +57,6 @@
       <el-form label-width="90px">
         <el-form-item label="规则名称">
           <el-input v-model="form.rule_name" />
-        </el-form-item>
-        <el-form-item label="rule_iri" v-if="!editing">
-          <el-input v-model="form.rule_iri" placeholder="如 contract:missingBreachClause" />
-        </el-form-item>
-        <el-form-item label="类型" v-if="!editing">
-          <el-radio-group v-model="form.rule_type">
-            <el-radio-button value="DETERMINISTIC">确定性（SPARQL）</el-radio-button>
-            <el-radio-button value="SEMANTIC">语义（LLM）</el-radio-button>
-          </el-radio-group>
         </el-form-item>
         <el-form-item label="严重级别">
           <el-radio-group v-model="form.severity">
@@ -91,21 +83,14 @@
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
 
-        <!-- 示例与讲解：按类型切换，降低新规则上手门槛 -->
+        <!-- 示例与讲解：降低新规则上手门槛。注意内容必须直接放在 collapse-item 内，
+             不能套 <template>——Vue3 里裸 <template> 会渲染成 display:none 的真实节点，内容将永远不可见 -->
         <el-collapse v-model="activeGuide" style="margin-top: 4px">
           <el-collapse-item title="示例与说明" name="guide">
-            <template v-if="form.rule_type === 'SEMANTIC'">
-              <p class="dim">语义规则用 LLM 判断「需要理解的违背」，expression 写判断指令。样例（违约条款检测）：</p>
-              <pre class="example-block">{{ SEMANTIC_EXAMPLE }}</pre>
-              <p class="dim">· prompt 须让 LLM 逐条返回 JSON 四字段：pass（是否违规）/ reason / evidence（原文证据，必须是原文子串）/ applicable（规则是否适用，false 计入 SKIPPED）</p>
-              <p class="dim">· 聚合方式：<b>any</b>=任一适用段命中即报；<b>all</b>=按整个合同整体判断（某段缺失不算违规）</p>
-            </template>
-            <template v-else>
-              <p class="dim">确定性规则用 SPARQL 查反例，expression 写 ASK。样例（缺乙方主体）：</p>
-              <pre class="example-block">{{ DETERMINISTIC_EXAMPLE }}</pre>
-              <p class="dim">· ASK 有解（存在反例）即 FAIL；多反例自动合并为一条 violation 并列出全部</p>
-              <p class="dim">· rule_iri 命名规范：<code>urn:rule:manual:{{ '{英文名}' }}</code>，如 <code>urn:rule:manual:missing_b_party</code></p>
-            </template>
+            <p class="dim">语义规则用 LLM 判断「需要理解的违背」，expression 写判断指令。样例（违约条款检测）：</p>
+            <pre class="example-block">{{ SEMANTIC_EXAMPLE }}</pre>
+            <p class="dim">· prompt 须让 LLM 逐条返回 JSON 四字段：pass（是否违规）/ reason / evidence（原文证据，必须是原文子串）/ applicable（规则是否适用，false 计入 SKIPPED）</p>
+            <p class="dim">· 聚合方式：<b>any</b>=任一适用段命中即报；<b>all</b>=按整个合同整体判断（某段缺失不算违规）</p>
           </el-collapse-item>
         </el-collapse>
       </el-form>
@@ -145,7 +130,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { createRule, disableRule, dryRunRule, listRules, listTasks, updateRule } from '../api'
+import { createRule, deleteRule, dryRunRule, listRules, listTasks, updateRule } from '../api'
 
 const filter = reactive({ rule_type: null, source: null, enabled: null, page: 1, size: 20 })
 const items = ref([])
@@ -163,18 +148,9 @@ const tasks = ref([])
 const running = ref(false)
 const runResult = ref(null)
 
-const activeGuide = ref([])
-// 示例素材取自 rules/manual/ 现有规则（与 seed 一致），新增规则时供参考
+const activeGuide = ref(['guide'])  // 默认展开示例说明，降低新规则上手门槛
+// 示例素材取自 rules/manual/ 现有语义规则（与 seed 一致），新增规则时供参考
 const SEMANTIC_EXAMPLE = `检查本合同是否具备明确的违约责任条款。判定依据是整个合同文本：只要原文明确了违约金数额、违约金比例（如"合同总价的10%"）、赔偿范围、责任承担方式中的任一具体内容，即视为具备明确违约责任条款，判定通过（pass=true）；只有当整个合同完全没有违约/赔偿/责任承担相关约定，或仅有"任何一方违约应赔偿损失"这类无任何具体化的泛泛表述时，才判定违约（pass=false）。`
-const DETERMINISTIC_EXAMPLE = `# rule_iri: urn:rule:manual:missing_b_party
-ASK {
-  ?s a <http://example.org/contract#Contract> .
-  FILTER NOT EXISTS {
-    ?s <http://example.org/contract#hasParty> ?pb .
-    ?pb <http://example.org/contract#partyRole> ?role .
-    FILTER (str(?role) = "乙方")
-  }
-}`
 
 function load(page) {
   filter.page = page
@@ -192,7 +168,7 @@ function load(page) {
 function openCreate() {
   editing.value = false
   Object.assign(form, {
-    rule_name: '', rule_iri: '', rule_type: 'SEMANTIC', severity: 'MEDIUM',
+    rule_name: '', rule_type: 'SEMANTIC', severity: 'MEDIUM',
     expression: '', aggregation: 'any', description: '',
   })
   drawer.value = true
@@ -229,7 +205,7 @@ function save() {
       ElMessage.error(e.response?.data?.detail || '保存失败')
     })
   } else {
-    createRule({ rule_iri: form.rule_iri, type: form.rule_type, ...body }).then(done).catch((e) => {
+    createRule({ type: form.rule_type, ...body }).then(done).catch((e) => {
       saving.value = false
       ElMessage.error(e.response?.data?.detail || '创建失败')
     })
@@ -238,7 +214,7 @@ function save() {
 
 function disable(row) {
   ElMessageBox.confirm(`确定失效规则「${row.rule_name}」？失效后不再参与校验。`, '提示', { type: 'warning' })
-    .then(() => disableRule(row.id))
+    .then(() => updateRule(row.id, { enabled: false }))
     .then(() => {
       ElMessage.success('已失效')
       load(filter.page)
@@ -246,6 +222,20 @@ function disable(row) {
     .catch((e) => {
       if (e !== 'cancel') {
         ElMessage.error(e?.response?.data?.detail || '失效失败')
+      }
+    })
+}
+
+function remove(row) {
+  ElMessageBox.confirm(`确定彻底删除规则「${row.rule_name}」？删除后不可恢复。`, '删除确认', { type: 'warning' })
+    .then(() => deleteRule(row.id))
+    .then(() => {
+      ElMessage.success('已删除')
+      load(filter.page)
+    })
+    .catch((e) => {
+      if (e !== 'cancel') {
+        ElMessage.error(e?.response?.data?.detail || '删除失败')
       }
     })
 }

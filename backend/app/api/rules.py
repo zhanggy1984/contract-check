@@ -19,12 +19,12 @@ def list_rules(rule_type: str | None = None, source: str | None = None,
 
 
 class CreateBody(BaseModel):
-    rule_iri: str
+    rule_iri: str | None = None   # 可选：缺省由规则名自动生成（用户无需填技术标识）
     name: str
-    type: str              # DETERMINISTIC / SEMANTIC
+    type: Literal["SEMANTIC"] = "SEMANTIC"   # 新建仅支持语义 LLM（确定性规则由本体生成）
     severity: str          # HIGH / MEDIUM / LOW
-    expression: str        # SPARQL 或 LLM prompt
-    aggregation: Literal["any", "all"] | None = None   # SEMANTIC 规则：缺失性检查用 all
+    expression: str        # LLM 判定 prompt
+    aggregation: Literal["any", "all"] | None = None   # 缺失性检查用 all
     description: str | None = None
 
 
@@ -56,9 +56,13 @@ def update_rule(rule_id: int, body: UpdateBody, db: Session = Depends(get_db)):
 
 @router.delete("/{rule_id}")
 def delete_rule(rule_id: int, db: Session = Depends(get_db)):
-    if not svc.disable_rule(db, rule_id):
-        raise HTTPException(400, "仅人工规则可失效（或规则不存在）")
-    return {"status": "disabled"}
+    try:
+        ok = svc.delete_rule(db, rule_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not ok:
+        raise HTTPException(404, "规则不存在")
+    return {"status": "deleted"}
 
 
 class DryRunBody(BaseModel):

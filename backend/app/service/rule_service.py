@@ -8,8 +8,8 @@
 import json
 
 from app.common.constants import RuleResult, RuleSource, RuleType
-from app.db.models import CheckRule, CheckTask
-from app.ontology.loader import load_ontology
+from app.db.models import CheckRule, CheckTask, RuleCheckResult, Violation
+from app.ontology.loader import load_ontology, register_version
 from app.ontology.rule_generator import generate_rules, load_manual_rules
 from app.validation.semantic_evaluator import SemanticEvaluator
 from app.validation.sparql_executor import SparqlExecutor, build_graph
@@ -64,7 +64,17 @@ def get_enabled_rules(db, ontology_version_id: int | None = None) -> list[CheckR
 
 def list_rules(db, rule_type: str | None = None, source: str | None = None,
                enabled: bool | None = None, page: int = 1, size: int = 20) -> dict:
-    q = db.query(CheckRule)
+    """规则列表：本体自动规则只展示当前版本，人工规则全量展示。
+
+    本体每次变更会注册新版本，旧版本规则会积累（同约束多条重复）；列表按
+    当前本体文件 md5 指纹对应的版本过滤，历史版本仅在校验记录里按 rule_id 引用。
+    """
+    from sqlalchemy import or_
+    cur_ovid = register_version(db)
+    q = db.query(CheckRule).filter(or_(
+        CheckRule.source == RuleSource.MANUAL.value,
+        CheckRule.ontology_version_id == cur_ovid,
+    ))
     if rule_type:
         q = q.filter(CheckRule.rule_type == rule_type)
     if source:
@@ -72,26 +82,45 @@ def list_rules(db, rule_type: str | None = None, source: str | None = None,
     if enabled is not None:
         q = q.filter(CheckRule.enabled.is_(enabled))
     total = q.count()
-    items = q.order_by(CheckRule.id).offset((page - 1) * size).limit(size).all()
+    items = q.order_by(CheckRule.id.desc()).offset((page - 1) * size).limit(size).all()
     return {"total": total, "page": page, "size": size, "items": [_rule_dict(r) for r in items]}
 
 
+def _gen_rule_iri(db, name: str) -> str:
+    """由规则名自动生成 rule_iri（urn:rule:manual:{名}），冲突追加 -2/-3 后缀。
+
+    rule_iri 是内部唯一标识（语义评估按它聚合、LLM prompt 按它标签），用户不需要填，
+    前端新建表单已去掉该输入；此处兜底保证唯一。rule_name 为空时退化为随机后缀。
+    """
+    base = f"urn:rule:manual:{name.strip()}"
+    if base == "urn:rule:manual:":
+        base += "untitled"
+    iri = base
+    n = 2
+    while db.query(CheckRule).filter_by(rule_iri=iri, ontology_version_id=None).first():
+        iri = f"{base}-{n}"
+        n += 1
+    return iri
+
+
 def create_rule(db, data: dict) -> CheckRule:
-    """创建人工规则（DETERMINISTIC/SEMANTIC），默认 disabled。"""
-    iri = data["rule_iri"].strip()
-    if data.get("type") not in (RuleType.DETERMINISTIC.value, RuleType.SEMANTIC.value):
-        raise ValueError("人工规则 type 仅支持 DETERMINISTIC/SEMANTIC")
-    if data.get("type") == RuleType.DETERMINISTIC.value:
-        aggregation = "any"          # SPARQL 全局图查询，聚合语义无意义，强制 any
-    else:
-        aggregation = data.get("aggregation") or "any"
-        if aggregation not in ("any", "all"):
-            raise ValueError("aggregation 仅支持 any/all")
+    """创建人工语义规则（仅 SEMANTIC/LLM，默认 disabled）。
+
+    确定性规则由本体 OWL 自动生成，人工规则只支持语义校验——SPARQL 门槛高，
+    用户写不准确，已在前端取消确定性类型入口，此处后端兜底强制。
+    rule_iri 可选：缺省由规则名自动生成（用户不用填技术标识）。
+    """
+    if data.get("type") != RuleType.SEMANTIC.value:
+        raise ValueError("新建规则仅支持 SEMANTIC（语义 LLM）类型")
+    iri = (data.get("rule_iri") or "").strip() or _gen_rule_iri(db, data["name"])
+    aggregation = data.get("aggregation") or "any"
+    if aggregation not in ("any", "all"):
+        raise ValueError("aggregation 仅支持 any/all")
     # 人工规则 ontology_version_id=NULL，MySQL 唯一键对 NULL 不生效 → 应用层查重
     if db.query(CheckRule).filter_by(rule_iri=iri, ontology_version_id=None).first():
         raise ValueError(f"rule_iri 已存在: {iri}")
     rule = CheckRule(
-        rule_iri=iri, rule_name=data["name"], rule_type=data["type"],
+        rule_iri=iri, rule_name=data["name"], rule_type=RuleType.SEMANTIC.value,
         severity=data["severity"], source=RuleSource.MANUAL.value,
         expression=data["expression"], aggregation=aggregation,
         description=data.get("description"),
@@ -121,12 +150,22 @@ def update_rule(db, rule_id: int, data: dict) -> CheckRule | None:
     return rule
 
 
-def disable_rule(db, rule_id: int) -> bool:
-    """软删（失效）人工规则。本体生成规则不可删。"""
+def delete_rule(db, rule_id: int) -> bool:
+    """物理删除人工规则。
+
+    本体生成规则不可删；已被校验记录（rule_check_result / violation）引用的规则
+    删除会破坏历史审计（FK 约束），拒绝并提示改「失效」（软删）。无引用的自定义规则彻底删除。
+    """
     rule = db.get(CheckRule, rule_id)
-    if rule is None or rule.source != RuleSource.MANUAL.value:
+    if rule is None:
         return False
-    rule.enabled = False
+    if rule.source != RuleSource.MANUAL.value:
+        raise ValueError("本体自动生成的规则不可删除")
+    refs = (db.query(RuleCheckResult).filter_by(rule_id=rule_id).count()
+            + db.query(Violation).filter_by(rule_id=rule_id).count())
+    if refs:
+        raise ValueError(f"该规则已被 {refs} 条校验记录引用，删除会破坏历史审计，请改用「失效」")
+    db.delete(rule)
     db.commit()
     return True
 
