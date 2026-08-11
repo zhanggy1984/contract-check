@@ -124,7 +124,13 @@ DEEPSEEK_MODEL=deepseek-chat
 
 ### 演示
 
-`data/test-contracts/` 内置 11 个场景合同（合规、缺日期/金额为负/类型越界、缺违约条款、权利义务不对等、长合同分段、扫描件 OCR 等）。注意：异常场景依赖 LLM 抽取如实输出，个别场景（如类型越界）LLM 可能做宽松枚举映射而不触发 FAIL，演示时多传几次即可，详见目录内 README。
+`data/gen_demo_contracts.py` 可一键生成 11 个场景演示合同（合规、缺日期/金额为负/类型越界、缺违约条款、权利义务不对等、长合同分段、扫描件 OCR 等），输出到 `data/test-contracts/`。生成脚本随仓库发布（PDF 体积大不入库），clone 后先运行：
+
+```bash
+python data/gen_demo_contracts.py   # 需 pymupdf + Pillow + 中文字体，跨平台自动查找
+```
+
+注意：异常场景依赖 LLM 抽取如实输出，个别场景（如类型越界）LLM 可能做宽松枚举映射而不触发 FAIL，演示时多传几次即可，详见目录内 README。
 
 ### 本地开发
 
