@@ -47,10 +47,21 @@
 | # | 任务 | 内容 | 验收标准 |
 |---|---|---|---|
 | T4.1 | PaddleOCR 接入 | `OcrService` 实现（PaddleOCR 3.x `predict()`、lang='ch'、置信度阈值、失败降级）；扫描 PDF→文本 | 扫描图片型 PDF 全流程可跑；has_scanned/ocr_applied 标记正确 |
-| T4.2 | 规则管理 UI | 规则列表（筛选）+ 编辑抽屉（SPARQL 编辑器 + dry-run 按钮、语义 prompt 编辑器） | 浏览器创建/编辑规则并 dry-run 预览命中 |
+| T4.2 | 规则管理 UI | 规则列表（只展示当前本体版本 + 类型/来源/启停/severity 筛选 + 大白话规则名）+ 新建抽屉（**仅语义 LLM**：prompt 编辑器 + aggregation any/all 选择，rule_iri 自动生成）+ 编辑抽屉（dry-run 按钮）+ 删除保护 | 浏览器创建/编辑规则并 dry-run 预览命中；无历史引用可物理删除、被引用拒绝并提示改用「失效」 |
 | T4.3 | 加固 | 任务超时兜底；checkpoint 定期清理（已完成/已取消）；文件生命周期（大小上限、临时文件清理、sha256 幂等去重）；日志（入参出参 debug） | 超时/取消场景正确；重复上传去重；checkpoint 清理脚本可执行 |
 | T4.4 | 报告导出 | `report` 模块：PDF（reportlab 中文字体）/ Excel（openpyxl），含抽取摘要+校验明细+violations+证据 | 下载 PDF/Excel 报告内容正确、中文正常 |
 | T4.5 | docker compose 整套部署 | backend/frontend Dockerfile；compose 拓扑（mysql+backend+frontend，nginx 反代 /api）；一键脚本 | `docker compose up -d --build` 一键启动；浏览器 http://localhost 完整可用 |
+
+## Phase 5 评测契约与稳定性加固（B.4）
+
+| # | 任务 | 内容 | 验收标准 |
+|---|---|---|---|
+| T5.1 | 评测契约 result 字段 | `GET /api/tasks/{id}/result` 同步 JSON 契约：`answer`（语义补全：FAILED/CANCELLED/WAITING_REVIEW/非终态非空 + 抽取结构摘要）、`usage`（token 全字段聚合，落 `check_task.token_usage_json`）、`timing`（start/end，first_token null）、`tool_calls`（规则命中明细全量含 PASS/SKIPPED）、`meta`（agent/model/interface/version） | `verify_cc_e2e.py` 全过：answer 非空、usage 三分量非负、timing 完整、tool_calls 结构齐全且覆盖 PASS/SKIPPED |
+| T5.2 | 契约清单端点 | `GET /api/contracts`：agent/interfaces/scenes 清单；`llm=false` 辅助接口（上传）只登记不进 agent_interface | 平台脚手架读此端点自动发现（决策 #55/#56） |
+| T5.3 | 稳定性加固 | persist_node 死锁（MySQL 1213/40001）整事务重试；call_json 截断恢复（`LengthFinishReasonError` 恢复 content/finish_reason/usage）；`token_usage_json` 旧库幂等补列迁移；error_message 超长截断防 1406 | 单测覆盖（test_nodes_persist / test_llm_call_json / test_main_migrate / test_usage_aggregation） |
+| T5.4 | single_party 手动规则 | 单方签署（签署方完整性）语义规则：下划线占位 / 盖章行冒号后为空 / 缺签署区 / 混合占位 → 检出；电子签章 / 仅签字 / 公章+签字 / 授权代表 / 仅法定代表人 / 电子签章 CA → 不误报 | verify_cc_variants.py / verify_cc_legal_variants.py / verify_cc_m_variants.py 全过（19 形态：合法零误报 + 缺陷全检出） |
+| T5.5 | 规则管理安全增强 | UI 新建仅语义 LLM 类型；rule_iri 由规则名自动生成（冲突加后缀）；删除保护（被历史引用拒绝、改用失效，本体规则不可删）；列表只展示当前本体版本；规则名翻译为大白话法律术语 | `test_rule_service.py` 覆盖（删除保护/IRI 自动生成/创建限制/当前版本过滤/规则名翻译） |
+| T5.6 | 全量回归 | 既有功能不破坏 | 单测扩至 **155 项全绿**；B.4 契约 + 单方签署专项验证全过 |
 
 ---
 
@@ -115,3 +126,12 @@
 - H1 .env 未被版本管理跟踪（.gitignore 生效，key 不泄露）
 - H2 上传文件仅本地处理（无任何第三方解析调用）
 - H3 `docker compose up -d --build` 一键启动，浏览器 http://localhost 全功能可用
+
+### 7.8 薄弱点专项验证（单方签署 + 评测契约）
+
+`data/test-contracts/gen_cc_*.py` 生成 19 种签署形态 PDF（正文统一、仅签署区形态不同），`verify_cc_*.py` 直连宿主 8001 验证：
+
+- 7.8-1 single_party 对 4 类缺陷形态全部检出：下划线空白占位（v0）/ 盖章行冒号后为空（v1）/ 缺整个签署区（v2）/ 既有署名又有空白占位（v3）；合规 good.pdf 零误报（verify_cc_variants.py）
+- 7.8-2 合法签署形态零误报：电子签章（l1）/ 仅签字（l2）/ 公章+签字（l3）/ 无冒号（l4）/ 「公章」措辞（l5）/ 混合合法（l6）/ 授权代表（m1）/ 仅法定代表人（m2）/ 签章混合词（m3）/ 合同专用章（m4）/ 电子签章 CA（m5）
+- 7.8-3 缺陷对照检出：电子签章缺方（l7）/ 签字空白（m6）/ 签章空白（m7）
+- 7.8-4 B.4 评测契约：answer/usage/timing/tool_calls 全字段达标，评测后 `DELETE /api/tasks/{id}` 清理（verify_cc_e2e.py）

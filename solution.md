@@ -1,6 +1,6 @@
 # AI 合同校验系统 · 解决方案
 
-> 状态：方案（审核修正版），待评审
+> 状态：方案（审核修正版），**已实现**——Phase 0-4 全部落地（155 项单测全绿），并完成 B.4 评测契约与稳定性加固（见 §15）
 > 技术底座：**Python + LangGraph + FastAPI + MySQL + Vue3**（非 Java）
 > 人工审核：**LangGraph 官方 human-in-the-loop（interrupt + resume）**
 
@@ -62,12 +62,12 @@
 | 语言/运行时 | Python 3.11+，venv / uv | Windows 本机开发 |
 | Agent 编排 | **LangGraph** | 线性状态图 + `interrupt()` 人工审核；不用 LCEL 自写状态机 |
 | 图持久化 | **`langgraph-checkpoint-mysql`（社区维护，须锁版本）** | `thread_id = task-{task_id}`；实施前先做 HITL spike 验证版本兼容；降级备选 SQLite checkpointer |
-| LLM | `langchain-openai` + DeepSeek | `base_url=https://api.deepseek.com`，`model=deepseek-chat`，**`max_tokens=8192`**；结构化输出用 `with_structured_output(method="json_mode")`（DeepSeek 不支持 json_schema），prompt 模板固定含 "JSON" 字样（json_object 模式前置要求）；Pydantic 校验 + 失败重试 + 空 content 兜底 |
+| LLM | `langchain-openai` + DeepSeek | `base_url=https://api.deepseek.com`，`model=deepseek-chat`，**`max_tokens=8192`**；结构化输出用 `with_structured_output(method="json_mode")`（DeepSeek 不支持 json_schema），prompt 模板固定含 "JSON" 字样（json_object 模式前置要求）；Pydantic 校验 + 失败重试 + 空 content 兜底；**B.4：`LengthFinishReasonError` 截断恢复 `content/finish_reason/usage`** |
 | Web 后端 | FastAPI + uvicorn | 异步原生，自动 OpenAPI 文档 |
 | 本体 | **owlready2** | 读 OWL、遍历概念/约束生成 schema、建 RDF 实例；SPARQL 校验用 `as_rdflib_graph()`（rdflib 为传递依赖，SPARQL 前缀需显式绑定，**rdflib 版本在 requirements 显式钉死**） |
 | PDF | **PyMuPDF (fitz)** 为主 | 有文本层直接提；无文本层标记需 OCR；复杂表格版式再引入 pdfplumber |
 | Word | python-docx | 仅 `.docx`；旧版 `.doc` 明确拒绝并提示 |
-| OCR | **PaddleOCR 3.x**（`OcrService` 接口可插拔） | Windows 可用；3.x 用 `predict()` 且需 `lang='ch'`，paddlepaddle/paddleocr 版本须配对 |
+| OCR | **PaddleOCR 3.x**（`OcrService` 接口可插拔） | Windows 可用；3.x 用 `predict()` 且需 `lang='ch'`，paddlepaddle/paddleocr 版本须配对；**已实现**（`app/ocr/ocr_service.py`，置信度阈值 + 失败降级 + 惰性加载） |
 | DB | SQLAlchemy 2.0 + PyMySQL | MySQL 8.0 |
 | 前端 | Vue3 + Vite + Element Plus + Axios | 轮询任务状态（无需 WebSocket） |
 | 报告导出 | PDF: reportlab（注册 Windows 中文字体）；Excel: openpyxl | 校验报告下载 |
@@ -222,7 +222,7 @@ START → parse_file → extract → validate_deterministic → validate_semanti
 
 - **确定性**（自动生成）：`Contract` 缺 `effectiveDate` / `totalAmount` / `contractType`；`contractType` / `currency` / `partyRole` 不在枚举内；`totalAmount < 0`。
 - **确定性**（人工 `.rq`）：终止日期早于生效日期；**合同缺少甲方或乙方任一主体**（minCardinality 只能保证 hasParty ≥ 1，"甲方乙方各一"需按 partyRole 语义判定，归人工规则）。
-- **语义**（LLM）：违约责任条款缺失；权利义务不对等（**evidence 必须是合同原文精确子串**）。
+- **语义**（LLM）：违约责任条款缺失（aggregation=all）；权利义务不对等；**单方签署（single_party）**——签署区空白占位 / 缺签署区 / 混合占位检出单方签署，合法签署形态（电子签章 / 仅签字 / 公章+签字 / 授权代表 / 法定代表人）不误报（**evidence 必须是合同原文精确子串**）。
 
 ---
 
@@ -278,7 +278,7 @@ status(UNCONFIRMED/CONFIRMED/FALSE_POSITIVE)
 - 上传大小上限（如 50MB）；`sha256` 唯一约束支持重复上传幂等去重；OCR 中间图与临时文件随任务结束清理。
 
 **`check_task`** — 校验任务（业务查询视图）
-`id, contract_file_id FK, status(PENDING/PARSING/EXTRACTING/VALIDATING/WAITING_REVIEW/REVIEWING/SUCCESS/FAILED/CANCELLED), progress, error_message, ontology_version_id FK, llm_model, extraction_status(COMPLETE/INCOMPLETE/FAILED，抽取质量标记), extraction_rdf MEDIUMTEXT(N-Triples 快照), standard_json LONGTEXT, segments_json LONGTEXT(文本分段，供 dry-run/报告复用), create_time, update_time`
+`id, contract_file_id FK, status(PENDING/PARSING/EXTRACTING/VALIDATING/WAITING_REVIEW/REVIEWING/SUCCESS/FAILED/CANCELLED), progress, error_message, ontology_version_id FK, llm_model, extraction_status(COMPLETE/INCOMPLETE/FAILED，抽取质量标记), extraction_rdf MEDIUMTEXT(N-Triples 快照), standard_json LONGTEXT, segments_json LONGTEXT(文本分段，供 dry-run/报告复用), token_usage_json LONGTEXT(B.4：聚合 LLM token 用量，供评测契约 usage), create_time, update_time`
 
 **`ontology_version`** — 本体版本
 `id, name, file_path, version, md5, loaded_time`
@@ -310,16 +310,18 @@ status(UNCONFIRMED/CONFIRMED/FALSE_POSITIVE)
 
 | 类型 | 来源 | 表达式 | 可编辑 |
 |---|---|---|---|
-| DETERMINISTIC | ONTOLOGY_GENERATED（本体约束自动生成） | SPARQL ASK | 否（只读，随本体版本更新） |
-| DETERMINISTIC | MANUAL（人工 `.rq` 规则） | SPARQL | 是 |
-| SEMANTIC | MANUAL（人工语义规则） | LLM prompt | 是 |
+| DETERMINISTIC | ONTOLOGY_GENERATED（本体约束自动生成） | SPARQL ASK | 否（只读，随本体版本更新，不可删） |
+| DETERMINISTIC | MANUAL（人工 `.rq` 规则，仓库预置） | SPARQL | 否（改文件 + 重启，UI 不提供新建） |
+| SEMANTIC | MANUAL（人工语义规则） | LLM prompt | 是（**UI 新建仅支持此类型**） |
 
 **规则生命周期**
 
-1. **创建**（仅人工规则）：名称、类型、严重级别、表达式（SPARQL 或 prompt）、描述 → 默认 `disabled`。语义规则可声明 `aggregation`（`any`/`all`，缺失性检查用 `all`，聚合语义见 §7.2）；确定性规则恒 `any`（SPARQL 全局图查询，无聚合语义）。
-2. **试运行 dry-run**：对选定的历史任务试跑规则，预览命中情况（**不落库**）——验证表达式正确性的核心体验。复用该任务的 RDF 实例与 `segments_json`（文本分段已随任务落库）；确定性规则跑 SPARQL 返回命中行，语义规则跑 LLM 返回 pass/evidence（**Phase 3 落地**：复用 `segments_json` 按段批跑，返回预计 token 成本）；**标注预计 token 成本**。
+1. **创建**（UI **仅支持语义 LLM 类型**）：名称、严重级别、LLM prompt 表达式、描述、`aggregation`（`any`/`all`，缺失性检查用 `all`，聚合语义见 §7.2）→ 默认 `disabled`；**`rule_iri` 由规则名自动生成**（`urn:rule:manual:{名}`，冲突自动追加 `-2` 后缀，前端不手填）。确定性规则由本体自动生成（用户不手写 SPARQL），仓库预置的 `.rq` 人工规则随代码发布。
+2. **试运行 dry-run**：对选定的历史任务试跑规则，预览命中情况（**不落库**）——验证表达式正确性的核心体验。复用该任务的 RDF 实例与 `segments_json`（文本分段已随任务落库）；确定性规则跑 SPARQL 返回命中行，语义规则跑 LLM 返回 pass/evidence（复用 `segments_json` 按段批跑，返回预计 token 成本）；**标注预计 token 成本**。
 3. **启停**：`enabled` 后进入校验管线。
-4. **编辑 / 失效**：表达式、严重级别、描述；本体自动生成规则只读。
+4. **编辑 / 失效**：表达式、严重级别、描述；本体自动生成规则只读（仅启停/severity）。
+5. **删除保护**：无历史校验引用的人工规则可**物理删除**；被 `rule_check_result` / `violation` 引用的规则禁止删除，提示改用「失效」；本体自动生成规则不可删。
+6. **展示**：规则列表**只展示当前本体版本**规则（历史版本不重复展示），按 ID 倒序；规则名自动翻译为**大白话法律术语**（合同 / 当事人 / 合同总金额…），用户可直接理解。
 5. **执行**：确定性规则由 `SparqlExecutor` 执行、语义规则由 `SemanticEvaluator` 执行，结果写入 `rule_check_result`。
 
 **本体版本与规则同步**：`check_rule` 主键为 `(rule_iri, ontology_version_id)`（版本化，见 §8.1）。加载新本体 → 按新版本**新增/更新**自动生成规则（人工规则 `ontology_version_id=NULL` 不动）→ 旧版本规则保留并置 `disabled`；`check_task.ontology_version_id` 保证任务与当时所用规则集一致，历史审计可解释。
@@ -332,14 +334,16 @@ GET  /api/tasks                    ?status&fileName&page&size → 历史任务�
 GET  /api/tasks/{id}               → {status, progress, message}     # 前端轮询
 POST /api/tasks/{id}/resume        {reviews: 覆盖全部 UNCONFIRMED 的 [{violation_id, action}]} → CAS 抢占 WAITING_REVIEW→REVIEWING 后触发 Command(resume)；并发/重试返回 409；invoke 失败幂等回退 WAITING_REVIEW
 POST /api/tasks/{id}/cancel        → PENDING/WAITING_REVIEW/REVIEWING 可取消，置 CANCELLED；运行中任务靠节点入口取消标志短路 + asyncio 取消；拒绝后续 resume，清理该线程 checkpoint
-GET  /api/tasks/{id}/result        → {standardJson, segments, extractionStatus, ruleCheckResults[], violations[]}   # 最终结果（含完整校验明细）
+GET  /api/tasks/{id}/result        → {standardJson, segments, extractionStatus, ruleCheckResults[], violations[], answer, usage, timing, tool_calls, meta}   # 最终结果（含完整校验明细 + B.4 评测契约字段，见 §15）
 GET  /api/tasks/{id}/report        ?format=pdf|excel → 校验报告下载（抽取摘要 + 校验明细 + violations + 原文证据）
+DELETE /api/tasks/{id}             → 删除任务（评测后清理，B.4；决策 #41 不产生假 review 记录）
+GET  /api/contracts                → B.4 标准契约清单（agent/interfaces/scenes；llm=false 辅助接口只登记不进 agent_interface，供平台自动发现）
 GET  /api/violations               ?taskId&status&ruleType&severity&page&size
 PATCH /api/violations/{id}/status  {status: CONFIRMED|FALSE_POSITIVE, confirmUser}  # SUCCESS 后纠偏（非审核主通道）
-GET  /api/rules                    ?ruleType&source&enabled&page&size → 规则列表
-POST /api/rules                    {rule_iri, name, type, severity, expression, aggregation?, description} → 创建人工规则（默认 disabled；语义规则可带 aggregation=any/all，非法值 422）
+GET  /api/rules                    ?ruleType&source&enabled&page&size → 规则列表（只展示当前本体版本，按 ID 倒序）
+POST /api/rules                    {name, severity, expression, aggregation?, description} → 创建人工规则（**仅语义 LLM 类型**，默认 disabled；rule_iri 自动生成；aggregation=any/all，非法值 422）
 PUT  /api/rules/{id}               {enabled, severity, expression, aggregation?, description} → 编辑（本体生成规则仅启停/severity）
-DELETE /api/rules/{id}             → 失效人工规则（软删）
+DELETE /api/rules/{id}             → 无历史引用的语义规则物理删除；被引用则拒绝（提示改用「失效」）；本体规则不可删
 POST /api/rules/{id}/dry-run       {taskId} → 模拟运行，预览命中（不落库）
 ```
 
@@ -360,28 +364,38 @@ POST /api/rules/{id}/dry-run       {taskId} → 模拟运行，预览命中（�
 
 ```
 contract-check/
-├── README.md
-├── solution.md
-├── docker-compose.yml         # 整套系统部署（mysql + backend + frontend），见 §14
+├── README.md / solution.md / task.md
+├── docker-compose.yml            # 整套系统部署（mysql + backend + frontend），见 §14
+├── docker-compose.override.yml   # 本地端口覆盖（8088/8003，用户确认保留，不入库）
+├── verify_cc_e2e.py              # B.4 评测契约 e2e 验证（answer/usage/timing/tool_calls + 清理）
+├── verify_cc_variants.py / verify_cc_legal_variants.py / verify_cc_m_variants.py  # single_party 变体验证
+├── start.ps1 / start.sh / stop.ps1
 ├── backend/
-│   ├── requirements.txt / pyproject.toml  # 含 python-multipart（FastAPI 上传必需）
-│   ├── .env.example              # DEEPSEEK_API_KEY, MYSQL_*
+│   ├── requirements.txt / requirements-dev.txt  # 含 python-multipart（FastAPI 上传必需）
+│   ├── .env                     # DEEPSEEK_API_KEY 等（本地文件，不入镜像）
 │   ├── app/
-│   │   ├── main.py               # FastAPI 入口，挂路由、启动加载本体
+│   │   ├── main.py               # FastAPI 入口：建表/幂等补列/本体加载/清理/恢复任务
 │   │   ├── config.py
-│   │   ├── api/                  # routers: files / tasks / violations / rules
-│   │   ├── graph/                # state.py, build.py, nodes/
-│   │   ├── parser/               # pdf / docx / ocr_service / segment_splitter
+│   │   ├── api/                  # routers: files / tasks / violations / rules / contracts
+│   │   │   └── contracts.py      # B.4 标准契约清单端点（agent/interfaces/scenes）
+│   │   ├── graph/                # state.py / build.py / nodes.py（HITL 流水线）
+│   │   ├── parser/               # pdf / docx / segment_splitter
+│   │   ├── ocr/                  # ocr_service（PaddleOCR 3.x，惰性加载）
 │   │   ├── ontology/             # loader / schema_mapper / rule_generator / rdf_converter
-│   │   ├── llm/                  # llm_client.py（DeepSeek 封装，含重试限流）
+│   │   ├── llm/                  # llm_client.py（DeepSeek 封装，429 退避/截断恢复）+ extractor
 │   │   ├── report/               # pdf_generator / excel_generator（校验报告导出）
-│   │   ├── validation/           # sparql_executor / semantic_evaluator / models
-│   │   ├── service/              # check_task_service / rule_service
+│   │   ├── validation/           # sparql_executor / semantic_evaluator / persist（单事务落库）
+│   │   ├── service/              # check_task_service（状态机/恢复/死锁重试） / rule_service
 │   │   └── db/                   # models.py(SQLAlchemy), session.py, schema.sql
 │   ├── ontology/
 │   │   └── contract_ontology.ttl # 示例合同本体
-│   └── rules/
-│       └── manual/*.rq           # 人工 SPARQL 规则
+│   ├── rules/manual/             # 3 条 SPARQL(.rq)：缺甲方/缺乙方/终止早于生效
+│   │                             # + 4 条语义 JSON：缺违约条款/权利义务不对等/技术标准引用/单方签署
+│   ├── tests/                    # 155 项单元测试
+│   └── scripts/                  # 验收/冒烟/PDF 生成脚本
+├── data/
+│   ├── gen_demo_contracts.py     # 11 个场景演示合同生成器（随仓库发布，PDF 不入库）
+│   └── test-contracts/           # 演示合同 + gen_cc_* 变体生成器 + verify 结果 JSON
 └── frontend/                     # Vue3 + Vite
     └── src/                      # 工作台(上传+审核+结果) / 历史记录 / 规则管理
 ```
@@ -407,6 +421,7 @@ contract-check/
 | 13 | **FastAPI 事件循环阻塞** | 同步 PyMySQL / checkpointer 调用放线程池（`asyncio.to_thread`），后台任务不阻塞轮询 |
 | 14 | **PaddleOCR 依赖重**（paddlepaddle 数百 MB，镜像大/构建慢） | 容器**内置 OCR**（已确认必含）；Dockerfile 依赖层分层缓存；本机先行验证 paddleocr 3.x + paddlepaddle 版本兼容与 CPU 推理 |
 | 15 | **reportlab 中文字体缺失**（Linux 容器无系统中文字体） | 容器 bundle 开源字体（思源黑体），reportlab 注册 TTF；本机开发复用系统字体 |
+| 16 | **并发落库死锁**（MySQL 1213 / 40001） | `persist_node` **整事务重试**（幂等，B.4 已实现）；`(task_id, rule_id)` 唯一键先删后插兜底 |
 
 ---
 
@@ -419,6 +434,7 @@ contract-check/
 | **Phase 2 确定性校验 + 人工审核闭环** | OntologyRuleGenerator + SPARQL + **双表原子落库** + 规则管理 API（CRUD + dry-run）+ 审核/结果 API + 前端审核视图 | 构造违约合同 → WAITING_REVIEW → 人工确认/误报 → resume → SUCCESS；rule_check_result 与 violation 一致 |
 | **Phase 3 语义校验** | SegmentSplitter（复用 T1.4）+ SemanticEvaluator（**按段批跑 + evidence 归一化防御 + confidence 标注**）；validate 节点拆分为 deterministic / semantic / persist 三节点（单事务统一落库）；预置语义规则 seed（缺违约条款 / 权利义务不对等 / 技术标准引用）；语义 dry-run 接入 | 条款级规则返回带原文证据与置信度（HIGH/LOW）的异常，进入同一审核闭环；INCOMPLETE 时确定性 SKIPPED、语义照跑 |
 | **Phase 4 OCR 与加固** | **T4.1** PaddleOCR 3.x 接入（`app/ocr/ocr_service.py`：lang='ch'、置信度阈值、失败降级、惰性加载；图新增 `ocr_node`：has_scanned 且未 OCR → 逐页转图识别 → 落文本 + `ocr_applied=True`）；**T4.4** 报告导出（`app/report/`：reportlab PDF + openpyxl Excel，含抽取摘要+校验明细+violations+原文证据+置信度）；**T4.3** 加固（任务超时兜底、checkpoint 定期清理、文件生命周期、API 入参出参 debug 日志）；**T4.2** 规则管理 UI（规则列表筛选 + 编辑抽屉：SPARQL 编辑器/dry-run、语义 prompt 编辑器 + aggregation 选择）；**T4.5** docker compose 整套部署（见 §14） | 扫描型 PDF 全流程（A3）；浏览器创建/编辑规则 + dry-run（T4.2 验收）；超时/取消正确（C7）；checkpoint 清理可执行（E4）；PDF/Excel 报告中文正常（G1）；`docker compose up -d --build` 一键启动、浏览器 http://localhost 完整可用（H3） |
+| **Phase 5 评测契约与加固（B.4）** | ① result 契约字段：`answer`（语义补全：FAILED/CANCELLED/WAITING_REVIEW/非终态都有非空摘要）+ `usage`（token 全字段聚合）+ `timing`（start/end，同步接口 first_token 为空）+ `tool_calls`（规则命中明细全量，含 PASS/SKIPPED，name/args/result 结构）+ `meta`；② `GET /api/contracts` 标准契约清单（agent/interfaces/scenes）；③ 稳定性：`persist_node` 死锁整事务重试、`call_json` 截断恢复、`token_usage_json` 旧库幂等补列迁移、error_message 超长截断；④ 规则管理安全增强（仅语义 LLM 新建 / rule_iri 自动生成 / 删除保护 / 当前版本过滤 / 大白话规则名）；⑤ `single_party` 手动语义规则 + `gen_cc_*`/`verify_cc_*` 变体验证脚本；⑥ 单测扩至 **155 项全绿** | 契约字段 `verify_cc_e2e.py` 全过（§5.2 同步 JSON 变体）；`verify_cc_variants.py` / `verify_cc_legal_variants.py` / `verify_cc_m_variants.py` 单方签署 19 形态（合法零误报 + 缺陷全检出）；`test_rule_service.py` 删除保护/IRI 生成覆盖 |
 
 ### 端到端验证
 
@@ -450,6 +466,54 @@ contract-check/
 **docker-compose.yml 扩展**（在 Phase 0 的 mysql 服务上追加）
 - `backend`：`depends_on` mysql（`condition: service_healthy`）、`env_file: .env`、volume 挂载数据目录（`data/uploads` / `data/parsed` 持久化）。
 - `frontend`：端口 `80:80`，`depends_on` backend。
+- `mysql`：宿主映射 `3307:3306`（3306 被同机 smart-procurement `sp-mysql` 占用；容器内 backend 连 `mysql:3306` 不变），healthcheck 就绪后 backend 才启动。
 - 一键脚本：`docker compose up -d --build` → 浏览器 http://localhost 全功能（上传→校验→审核→报告导出）。
+- **端口覆盖**：宿主 80/8001 被 rag-nginx / rag-attu 占用时，用 `docker-compose.override.yml`（`!override` 整体替换 ports）改 `8088:80` / `8003:8000`，避免追加合并导致默认端口仍绑定失败。
 
-**验收**：H3 一键启动浏览器全功能可用；A3 扫描 PDF（容器内 OCR）；G1 报告中文正常（容器内开源字体）。
+**验收**：H3 一键启动浏览器全功能可用；A3 扫描 PDF（容器内 OCR）；G1 报告中文正常（容器内开源字体）；B.4 契约 `verify_cc_e2e.py` 直连宿主 8001 全过。
+
+---
+
+## 15. 评测契约（B.4，已实现）
+
+B.4 面向标准评测平台（§5.2 同步 JSON 变体）补齐 agent 接口契约，平台脚手架读 `GET /api/contracts` 做接口自动发现（决策 #55/#56）。
+
+### 15.1 契约清单端点 `GET /api/contracts`
+
+公开无鉴权，声明 agent 的 LLM 评测接口与场景清单：
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `agent` | `contract-check` | agent 标识 |
+| `contract_version` | `1.0` | 契约版本 |
+| `interfaces` | result / upload | `llm=true` 的 result 进 agent_interface；`llm=false` 的 upload 为辅助接口只登记 |
+| `scenes` | missing_date / single_party / scanned_pdf / conflict / genuine | 场景标签，与平台 seed_data 一致 |
+
+### 15.2 结果契约 `GET /api/tasks/{id}/result`
+
+同步 JSON 变体（同步接口不测首字，`timing.first_token_ts` 恒 null，决策 #40）：
+
+| 字段 | 说明 |
+|---|---|
+| `answer` | 校验摘要文本（必选非空）：violations 按 severity 排序拼接；无违规时给完成态描述并补**抽取结构摘要**（合同名称/金额/条款数/当事人…）；FAILED/CANCELLED/WAITING_REVIEW/非终态均有语义补全（#234） |
+| `usage` | 聚合 LLM token（抽取 + 语义校验全字段求和，落 `check_task.token_usage_json`）；`prompt/completion/total_tokens` 三分量非负 |
+| `timing` | `start_ts`（任务创建）/ `end_ts`（最后状态变更）；`first_token_ts=null` |
+| `tool_calls` | **规则命中明细全量**（含 PASS/SKIPPED，D1 决策）；`name`=规则名，`args`=规则定义（rule_id/type/severity/concept/property/segment_ref），`result`=判定结果+evidence+confidence |
+| `meta` | `agent/model/interface/contract_version`（model 缺失会导致平台 cost 列缺失，7.3 已修复） |
+
+### 15.3 取数与清理约定
+
+- 评测取数终态：有 HIGH 违规 → `WAITING_REVIEW`（决策 #41，**不 resume**，避免产生假 review 记录）；合规/全 PASS → `SUCCESS`；
+- 评测后调用 `DELETE /api/tasks/{id}` 清理任务（决策 #41/#58）；
+- 宿主系统代理（Clash 等）会劫持内网 localhost 请求 → 评测脚本统一 `httpx.Client(trust_env=False)` 直连。
+
+### 15.4 配套验证脚本与变体合同
+
+| 脚本 | 验证点 |
+|---|---|
+| `verify_cc_e2e.py` | B.4 契约字段全量（answer/usage/timing/tool_calls/meta）+ 评测后清理 |
+| `verify_cc_variants.py` | single_party 对 v0-v3 缺陷形态（下划线占位 / 冒号后为空 / 缺签署区 / 混合）检出、good 无误报 |
+| `verify_cc_legal_variants.py` | l1-l7 合法签署形态（电子签章 / 仅签字 / 公章+签字 / 无冒号）不误报、缺方对照检出 |
+| `verify_cc_m_variants.py` | m1-m7 签署形态边界（授权代表 / 仅法定代表人 / 电子签章 CA / 空白占位） |
+
+`data/test-contracts/gen_cc_*.py` 生成上述 19 种签署形态 PDF（正文统一、仅签署区形态不同），均由 `reportlab` 生成并显式注册中文字体（PyMuPDF 中文字体坑见开发环境记录）。
