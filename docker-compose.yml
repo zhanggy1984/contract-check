@@ -12,7 +12,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
       # M6：开发用暴露宿主 3306（宿主工具/宿主 dev 后端直连）；生产环境请移除该映射
-      - "3306:3306"
+      # B.4：宿主 3306 被 smart-procurement sp-mysql 占用，改 3307（容器内 backend 连 mysql:3306 不变）
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:

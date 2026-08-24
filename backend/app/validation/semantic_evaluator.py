@@ -81,11 +81,18 @@ def evidence_ok(segments: list[dict], evidence: str) -> bool:
 
 
 class SemanticEvaluator:
-    """无状态评估器（可并发）。token_cost 累计 LLM usage 供 dry-run 标注。"""
+    """无状态评估器（可并发）。usage 累计 LLM token 三分量（评测契约透出，B.4）；token_cost 兼容 dry-run。"""
 
     def __init__(self, max_attempts: int = 2):
         self.max_attempts = max_attempts
-        self.token_cost = 0
+        # 7.4 cache 字段：DeepSeek usage 带 hit/miss，累加透传评测平台按命中价计成本
+        self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                      "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0}
+
+    @property
+    def token_cost(self) -> int:
+        """dry-run 标注用：total_tokens 兼容旧读法。"""
+        return self.usage["total_tokens"]
 
     def evaluate(self, segments: list[dict], rules: list[dict]) -> list[SemanticOutcome]:
         """按段批跑语义规则，汇总为单规则单结果。
@@ -205,7 +212,8 @@ class SemanticEvaluator:
     def _add_cost(self, usage: dict | None) -> None:
         if not usage:
             return
-        self.token_cost += int(usage.get("total_tokens") or 0)
+        for _k in self.usage:
+            self.usage[_k] += int(usage.get(_k) or 0)
 
 
 def _build_prompt(segment: dict, rules: list[dict], feedback: str | None = None) -> str:

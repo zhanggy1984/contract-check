@@ -3,11 +3,13 @@
 语义校验节点在 Phase 3 接入；await_human_review 保持纯节点。
 """
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
 from langgraph.types import interrupt
+from sqlalchemy.exc import OperationalError
 
 from app.common.constants import ExtractionStatus, RuleResult, RuleType, TaskStatus, ViolationStatus
 from app.common.errors import TaskCancelledError
@@ -28,6 +30,20 @@ from app.validation.sparql_executor import SparqlExecutor, build_graph
 
 PARSED_DIR = Path("data/parsed")
 
+logger = logging.getLogger(__name__)
+
+# persist 死锁重试（T232）：多任务并发时各自 DELETE+INSERT rule_check_result/violation，
+# InnoDB 间隙锁/插入意向锁竞争死锁（1213/40001）是常态，MySQL 自动回滚受害者事务，
+# 业务层整体重试即可——重试必须覆盖「usage 落库 + persist」整个事务（_persist_once）。
+_PERSIST_RETRY_MAX = 3
+
+
+def _is_deadlock(e: OperationalError) -> bool:
+    """1213 死锁 / 40001 序列化失败（InnoDB 均须重试受害者事务）。"""
+    args = getattr(e.orig, "args", ()) if e.orig is not None else ()
+    return bool(args) and args[0] in (1213, 40001)
+
+
 # 规则种类从 rule_iri 解析：urn:rule:{kind}:...（本体生成 required/enum/min/pattern，人工 manual）
 _RULE_KIND_RE = re.compile(r"^urn:rule:([a-z]+):")
 
@@ -38,6 +54,17 @@ def _rule_kind(rule_iri: str | None) -> str | None:
         return None
     m = _RULE_KIND_RE.match(rule_iri)
     return m.group(1) if m else None
+
+
+def _merge_usage(a: dict | None, b: dict | None) -> dict | None:
+    """评测契约 usage 聚合（B.4）：抽取与语义 token 全字段求和（含 7.4 cache）。两者皆空返回 None（不落库）。"""
+    if not a and not b:
+        return None
+    return {
+        k: (a.get(k, 0) if a else 0) + (b.get(k, 0) if b else 0)
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens",
+                  "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
+    }
 
 
 def parse_node(state: TaskState) -> dict:
@@ -113,6 +140,7 @@ def extract_node(state: TaskState) -> dict:
         "extraction_status": result.status,
         "extraction_rdf": rdf_nt,
         "segments": segments,
+        "extraction_usage": result.token_usage,   # 评测契约 usage（B.4），persist 统一落库
     }
 
 
@@ -185,13 +213,13 @@ def validate_semantic(state: TaskState) -> dict:
         segments = json.loads(task.segments_json) if task.segments_json else []
 
     if not rules:
-        return {"sem_outcomes": []}
+        return {"sem_outcomes": [], "sem_usage": None}
     if not segments:
         # 无分段原文可评 = 评估失败（而非规则不适用），标 LOW 供审计识别
         return {"sem_outcomes": [
             {"rule_id": r.id, "result": RuleResult.SKIPPED.value, "confidence": "LOW"}
             for r in rules
-        ]}
+        ], "sem_usage": None}
     evaluator = SemanticEvaluator()
     results = evaluator.evaluate(
         segments,
@@ -203,7 +231,7 @@ def validate_semantic(state: TaskState) -> dict:
          "evidence_text": o.evidence_text, "segment_ref": o.segment_ref,
          "confidence": o.confidence}
         for o in results
-    ]}
+    ], "sem_usage": evaluator.usage}   # 评测契约 usage（B.4），persist 统一落库
 
 
 def persist_node(state: TaskState) -> dict:
@@ -211,6 +239,18 @@ def persist_node(state: TaskState) -> dict:
     task_id = state["task_id"]
     det = state.get("det_outcomes") or []
     sem = state.get("sem_outcomes") or []
+    for attempt in range(1, _PERSIST_RETRY_MAX + 1):
+        try:
+            return _persist_once(state, task_id, det, sem)
+        except OperationalError as e:
+            if _is_deadlock(e) and attempt < _PERSIST_RETRY_MAX:
+                logger.warning("persist 死锁重试 %d/%d task_id=%s", attempt, _PERSIST_RETRY_MAX, task_id)
+                continue
+            raise
+
+
+def _persist_once(state: TaskState, task_id: int, det: list, sem: list) -> dict:
+    """单次事务：usage 落库 + 幂等写 rule_check_result + violation（死锁由 persist_node 重试整事务）。"""
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
         if task is None:
@@ -233,6 +273,10 @@ def persist_node(state: TaskState) -> dict:
                     evidence_text=o.get("evidence_text"),
                     confidence=o.get("confidence") or "HIGH",
                 ))
+        # 评测契约 usage 聚合落库（B.4）：抽取 + 语义 token 三分量，与校验结果同事务
+        usage = _merge_usage(state.get("extraction_usage"), state.get("sem_usage"))
+        if usage:
+            task.token_usage_json = json.dumps(usage, ensure_ascii=False)
         info = persist_results(db, task_id, outcomes)
     return {"violations_count": info["violations"], "rule_results_count": info["rows"]}
 

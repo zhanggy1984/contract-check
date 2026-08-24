@@ -110,7 +110,10 @@ def update_status(task_id: int, status: str, progress: int | None = None, error:
         if progress is not None:
             task.progress = progress
         if error is not None:
-            task.error_message = error
+            # T232：error_message 是 varchar(1000)，超长异常堆栈（langgraph/pymysql 层层嵌套）
+            # 直接赋值会 1406 导致状态更新失败——任务永久卡在旧状态（如 VALIDATING），
+            # 平台侧 300s 轮询超时判错。截断保证状态一定落库。
+            task.error_message = error[:1000]
         db.commit()
 
 

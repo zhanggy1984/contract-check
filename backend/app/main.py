@@ -4,8 +4,9 @@ import os
 import time
 
 from fastapi import FastAPI, Request
+from sqlalchemy import text
 
-from app.api import files, rules, tasks, violations
+from app.api import contracts, files, rules, tasks, violations
 from app.db import models
 from app.db.session import engine
 from app.ontology.loader import ensure_loaded
@@ -23,6 +24,7 @@ app.include_router(files.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(violations.router, prefix="/api")
 app.include_router(rules.router, prefix="/api")
+app.include_router(contracts.router, prefix="/api")
 
 
 @app.middleware("http")
@@ -47,9 +49,24 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+def _ensure_column(engine, table: str, column: str, ddl_type: str) -> None:
+    """幂等补列：create_all 不修改已存在的表，旧库升级需手动 ALTER（B.4 token_usage_json）。
+
+    MySQL 无 ADD COLUMN IF NOT EXISTS，先查 information_schema 缺列再 ALTER。
+    """
+    with engine.begin() as conn:
+        exists = conn.execute(text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"
+        ), {"t": table, "c": column}).scalar()
+        if not exists:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     models.Base.metadata.create_all(bind=engine)
+    _ensure_column(engine, "check_task", "token_usage_json", "LONGTEXT")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
     svc.cleanup_terminal_checkpoints()  # 启动兜底：清理终态任务 checkpoint（T4.3-2）
     files.cleanup_orphan_files()        # 启动兜底：清理孤儿文件（T4.3-3）

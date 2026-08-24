@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from openai import LengthFinishReasonError
 
 from app.config import settings
 
@@ -35,7 +36,20 @@ def call_json(system: str, user: str) -> tuple[str | None, str, dict[str, Any] |
     finish_reason == "length" 表示输出被 max_tokens 截断，调用方须分段重抽。
     """
     llm = get_chat_model()
-    resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+    try:
+        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+    except LengthFinishReasonError as e:
+        # T232：openai SDK 在 finish_reason="length" 时抛 LengthFinishReasonError 而非正常返回，
+        # 异常自带完整响应对象。此处恢复 content/finish_reason/usage 按截断返回，让 extractor/
+        # semantic_evaluator 的 finish_reason=="length" 降级分支真正生效（否则降级分支是死代码，
+        # 超长合同抽取直接抛异常 FAILED，usage 也不聚合落库 → 平台判 no_usage）。
+        comp = e.completion
+        content = comp.choices[0].message.content if comp.choices else None
+        if isinstance(content, list):  # 个别情况 content 为块列表，取文本
+            content = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        finish_reason = str(comp.choices[0].finish_reason or "length") if comp.choices else "length"
+        usage = comp.usage.model_dump() if comp.usage else None
+        return (content if isinstance(content, str) else None, finish_reason, usage)
     content = resp.content
     if isinstance(content, list):  # 个别情况 content 为块列表，取文本
         content = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))

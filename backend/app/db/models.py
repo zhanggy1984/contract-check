@@ -55,6 +55,7 @@ class CheckTask(Base):
     standard_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)
     segments_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)
     extraction_conflicts: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)  # 分段抽取字段冲突 JSON 数组（A5）
+    token_usage_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)      # 评测契约 usage 聚合（抽取+语义，B.4）
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     update_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
     contract_file: Mapped["ContractFile"] = relationship()
