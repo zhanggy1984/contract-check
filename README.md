@@ -2,9 +2,20 @@
 
 > **本体驱动 + 大模型抽取 + 混合校验 + 人工审核闭环**的合同智能审查系统：上传合同（PDF / Word / 扫描件），自动抽取为结构化标准数据，按本体定义的规则做确定性 + 语义双重校验，全量落库并进入人工审核闭环，最终输出校验报告。
 
-本系统是**生产级演示项目**：3 个容器一键启动、11 个场景演示合同开箱即演示、155 项单元测试全绿、本体驱动的规则集版本化可回溯、评测契约（B.4）对接标准平台。
+本系统是**生产级演示项目**：共享 infra + 2 应用服务一键启动、11 个场景演示合同开箱即演示、155 项单元测试全绿、本体驱动的规则集版本化可回溯、评测契约（B.4）对接标准平台。
 
 ---
+
+> ## ⚠️ 前置依赖：共享 infra
+>
+> 本 agent **不自带任何中间件**，运行前须先部署共享 infra（MySQL 等）。
+>
+> ```bash
+> # 发布物：clone infra 独立仓库后启动
+> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
+> # 本地开发：infra 位于 ../infra
+> cd ../infra && docker compose up -d
+> ```
 
 ## 目录
 
@@ -164,10 +175,11 @@ graph TB
 ## 六、快速开始（3 步跑起来）
 
 > 前置：Docker Desktop（Linux 容器）。
+> **共享 infra**：本 agent 不自带任何中间件（仅依赖共享 infra 的 MySQL）。启动前先部署 infra（见 infra 仓库 README：`docker compose up -d`）。
 
 ### 第 1 步：配置环境变量
 
-- 项目根 `.env`：DB 凭据单一事实源（`MYSQL_*`，mysql 与 backend 均引用）；
+- 项目根 `.env`：`MYSQL_DATABASE`/`MYSQL_USER`/`MYSQL_PASSWORD`（共享 infra 的 `contract_check` 库账号；`MYSQL_HOST`/`MYSQL_PORT` 已由 compose 固定为逻辑主机名 `mysql`/3306）；
 - `backend/.env`：DeepSeek 配置（本地文件，不入镜像）：
 
 ```
@@ -176,16 +188,15 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 ```
 
-### 第 2 步：一键启动（3 容器）
+### 第 2 步：启动应用容器（backend + frontend）
 
 ```bash
-# Windows
-powershell -ExecutionPolicy Bypass -File start.ps1
-# 或 Linux（自动预拉镜像 + 构建）
-./start.sh
-# 手动方式
 docker compose up -d --build
+docker compose ps                 # contract-check-backend / contract-check-frontend 全部 Up + healthy
+# 快捷方式（同一命令封装）：./start.sh（Linux）或 powershell start.ps1（Windows）
 ```
+
+> 本 agent 只起应用容器；中间件仅 MySQL（共享 infra 的 `contract_check` 库）。
 
 ### 第 3 步：生成演示合同
 
@@ -197,11 +208,11 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 
 | 地址 | 说明 |
 |------|------|
-| http://localhost | 前端（Vue3 工作台） |
-| http://localhost:8001 | 后端 API（OpenAPI 文档 `/docs`） |
-| localhost:3307 | MySQL（容器内连 `mysql:3306` 不变） |
+| http://localhost:8088 | 前端（Vue3 工作台） |
+| http://localhost:8003 | 后端 API（OpenAPI 文档 `/docs`） |
+| localhost:33061 | MySQL（共享 infra，库 `contract_check`） |
 
-> **端口覆盖**：宿主 80/8001 被 rag-nginx / rag-attu 占用时，用 `docker-compose.override.yml`（`!override` 整体替换 ports）改 `8088:80` / `8003:8000`，避免追加合并导致默认端口仍绑定失败。
+> **端口覆盖**：宿主端口固定（前端 8088 / 后端 8003），如需改动 `docker-compose.yml` 的 `ports` 即可；中间件端口由共享 infra 管理。
 
 停止（保留数据卷）：`docker compose down`（或 `stop.ps1`）。
 
