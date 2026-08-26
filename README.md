@@ -121,7 +121,10 @@
 ```mermaid
 graph TB
     subgraph 前端
-        FE["frontend (Vue3 + nginx :80)<br/>Vite 构建 + /api 反代"]
+        FE["frontend (Vue3 + nginx :80)<br/>Vite 构建 + /api 反代 → api-gateway"]
+    end
+    subgraph 共享网关
+        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
     end
     subgraph 应用层
         API["backend (FastAPI :8000)<br/>REST API + LangGraph 流水线<br/>startup 建表/本体加载/恢复任务"]
@@ -132,7 +135,8 @@ graph TB
         OCR["PaddleOCR<br/>扫描件识别"]
     end
 
-    FE --> API
+    FE --> GATEWAY
+    GATEWAY --> API
     API --> MYSQL
     API --> DS
     API --> OCR
