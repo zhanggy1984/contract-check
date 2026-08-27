@@ -87,8 +87,11 @@ def _persist_decisions(task_id: int, traces: list) -> None:
 
 
 def parse_node(state: TaskState) -> dict:
-    """读取已解析文本并置 PARSING；扫描件（无文本层）在此触发 OCR（T4.1）；CANCELLED 时短路。
+    """读取已解析文本并置 PARSING；扫描页（无文本层）在此触发 OCR（T4.1）；CANCELLED 时短路。
 
+    P0 页级修复：优先用上传时落库的页级文本（page_texts_json，单一事实来源），
+    对扫描页（清洗后为空）逐页 OCR 按页序合并——混合扫描 PDF 只补空页，不重扫有文本层的页。
+    无页级数据的历史任务回退：has_scanned 布尔 + 全文 OCR。
     OCR 失败（模型缺失/识别异常）抛异常 → 任务 FAILED 带提示，不做"空文本进抽取"。
     """
     with SessionLocal() as db:
@@ -104,21 +107,48 @@ def parse_node(state: TaskState) -> dict:
         sha = cf.sha256
         storage_path = cf.storage_path
         file_name, file_size = cf.file_name, cf.file_size
-        has_scanned, ocr_applied = bool(cf.has_scanned), bool(cf.ocr_applied)
+        ocr_applied = bool(cf.ocr_applied)
+        try:
+            page_texts = json.loads(cf.page_texts_json) if cf.page_texts_json else None
+        except (json.JSONDecodeError, TypeError):
+            page_texts = None   # 历史脏数据防御：非法 JSON 按无页级数据回退
+        if not isinstance(page_texts, list) or not all(isinstance(t, str) for t in page_texts):
+            page_texts = None   # 非列表 / 含非字符串元素同样回退（防 t.strip() 崩任务）
 
     txt = PARSED_DIR / f"{sha}.txt"
     text = txt.read_text(encoding="utf-8") if txt.exists() else ""
     # 受约束 OCR 决策：确定性否决权优先，LLM 仅歧义场景判断；保守模式执行与旧版一致
-    need_ocr, ocr_trace = decide_ocr_required(
-        has_scanned=has_scanned, ocr_applied=ocr_applied,
-        existing_text=text, pdf_path=storage_path, file_name=file_name, file_size=file_size,
-    )
-    _persist_decisions(state["task_id"], [ocr_trace])
+    if page_texts is not None:
+        # 页级路径：扫描页 = 清洗后为空的页；文本层可读不构成跳过理由（混合扫描 PDF）
+        scanned = [i for i, t in enumerate(page_texts) if not t.strip()]
+        need_ocr, ocr_trace = decide_ocr_required(
+            scanned_pages=scanned, ocr_applied=ocr_applied,
+            existing_text=text, pdf_path=storage_path, file_name=file_name, file_size=file_size,
+        )
+        _persist_decisions(state["task_id"], [ocr_trace])
+        if need_ocr:
+            ocr_map = registry.execute("ocr_pdf", pdf_path=storage_path, pages=scanned)["pages"]
+            for idx, t in ocr_map.items():
+                page_texts[idx] = t
+            text = "\n".join(page_texts)
+    else:
+        # 历史任务回退：无页级数据，沿用 has_scanned + 全文 OCR
+        need_ocr, ocr_trace = decide_ocr_required(
+            has_scanned=bool(cf.has_scanned), ocr_applied=ocr_applied,
+            existing_text=text, pdf_path=storage_path, file_name=file_name, file_size=file_size,
+        )
+        _persist_decisions(state["task_id"], [ocr_trace])
+        if need_ocr:
+            # 全文 OCR：exec_ocr_pdf 返回 {页索引: 文本}，按页序合并（页索引有序）
+            ocr_map = registry.execute("ocr_pdf", pdf_path=storage_path)["pages"]
+            text = "\n".join(ocr_map.values())
     if need_ocr:
-        text = registry.execute("ocr_pdf", pdf_path=storage_path)["text"]
         txt.write_text(text, encoding="utf-8")
         with SessionLocal() as db:
-            db.get(CheckTask, state["task_id"]).contract_file.ocr_applied = True
+            task = db.get(CheckTask, state["task_id"])
+            task.contract_file.ocr_applied = True
+            if page_texts is not None:
+                task.contract_file.page_texts_json = json.dumps(page_texts, ensure_ascii=False)
             db.commit()
     return {"parsed_text": text}
 

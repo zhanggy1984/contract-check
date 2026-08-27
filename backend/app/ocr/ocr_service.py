@@ -2,10 +2,17 @@
 
 - 惰性加载：首次调用才加载模型（数百 MB），避免应用启动变慢
 - 置信度阈值：低于阈值的结果丢弃，防"垃圾进垃圾出"
-- 失败降级：OCR 不可用/失败抛明确异常，由图节点置任务 FAILED 提示人工
+- 页级隔离：pages 指定时只识别这些页（混合扫描 PDF 逐页 OCR），单页失败不中止整篇
+- 失败降级：OCR 不可用/全部页失败抛明确异常，由图节点置任务 FAILED 提示人工
 - 兼容 PaddleOCR 2.x（ocr()）与 3.x（predict()）返回结构
 """
+import logging
 import threading
+
+import numpy as np
+import pymupdf
+
+logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.6  # 低于该置信度的识别行丢弃
 
@@ -37,31 +44,46 @@ class OcrService:
         return _ocr
 
     @classmethod
-    def ocr_pdf(cls, pdf_path: str) -> str:
-        """扫描 PDF 逐页渲染为位图 → OCR → 按行拼接文本（低置信行丢弃）。"""
+    def ocr_pdf(cls, pdf_path: str, pages: list[int] | None = None) -> dict[int, str]:
+        """扫描 PDF 页 → OCR 文本，返回 {页索引: 文本}。
+
+        pages=None 时全部页；指定 pages 时只识别这些页（混合扫描 PDF 仅 OCR 空页）。
+        逐页隔离：单页渲染/识别失败不中止整篇（该页缺席，调用方感知缺页）；
+        全部页失败抛 RuntimeError（图节点置任务 FAILED 提示人工，不做空文本进抽取）。
+        """
         if not cls.available():
             raise RuntimeError("PaddleOCR 未安装，无法识别扫描件")
         model = cls._model()
-        import numpy as np
-        import pymupdf
 
         doc = pymupdf.open(pdf_path)
-        lines: list[str] = []
+        indices = list(range(len(doc))) if pages is None else sorted(set(pages))
+        results: dict[int, str] = {}
+        failures = 0
         try:
-            for page in doc:
-                pix = page.get_pixmap(dpi=200)
-                img = np.frombuffer(pix.samples, dtype=np.uint8)
-                img = img.reshape(pix.height, pix.width, pix.n)
-                if pix.n == 4:
-                    img = img[:, :, :3]
-                for text, score in cls._run(model, img):
-                    if float(score) >= CONFIDENCE_THRESHOLD:
-                        t = str(text).strip()
-                        if t:
-                            lines.append(t)
+            for i in indices:
+                try:
+                    page = doc[i]
+                    pix = page.get_pixmap(dpi=200)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8)
+                    img = img.reshape(pix.height, pix.width, pix.n)
+                    if pix.n == 4:
+                        img = img[:, :, :3]
+                    page_lines: list[str] = []
+                    for text, score in cls._run(model, img):
+                        if float(score) >= CONFIDENCE_THRESHOLD:
+                            t = str(text).strip()
+                            if t:
+                                page_lines.append(t)
+                    if page_lines:
+                        results[i] = "\n".join(page_lines)
+                except Exception as e:  # noqa: BLE001 单页失败不中止整篇
+                    failures += 1
+                    logger.warning("OCR 失败 第 %s 页: %s", i, e)
         finally:
             doc.close()
-        return "\n".join(lines)
+        if indices and failures == len(indices):
+            raise RuntimeError(f"OCR 全部失败（{failures}/{len(indices)} 页）")
+        return results
 
     @staticmethod
     def _run(model, img) -> list[tuple[str, float]]:

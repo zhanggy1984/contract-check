@@ -23,8 +23,9 @@ class ContractFile(Base):
     storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    has_scanned: Mapped[bool] = mapped_column(Boolean, default=False)  # 无文本层→需 OCR
+    has_scanned: Mapped[bool] = mapped_column(Boolean, default=False)  # 存在扫描页→需 OCR
     ocr_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    page_texts_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)  # 页级文本 JSON（逐页 OCR 的单一事实来源）
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 

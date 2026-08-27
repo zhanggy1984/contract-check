@@ -74,6 +74,40 @@ class TestOcrShortCircuit(unittest.TestCase):
             self.assertEqual(trace["status"], "short_circuit")
             m.assert_not_called()
 
+    def test_page_level_no_scanned_pages_skip(self):
+        # 页级契约：无扫描页 → 短路 skip，不调 LLM
+        with mock.patch(_DECIDE_OCR) as m:
+            need, trace = decide_ocr_required(scanned_pages=[], ocr_applied=False, existing_text="")
+            self.assertFalse(need)
+            self.assertEqual(trace["status"], "short_circuit")
+            m.assert_not_called()
+
+    def test_page_level_ocr_applied_skip(self):
+        with mock.patch(_DECIDE_OCR) as m:
+            need, trace = decide_ocr_required(scanned_pages=[0, 2], ocr_applied=True, existing_text="")
+            self.assertFalse(need)
+            self.assertEqual(trace["status"], "short_circuit")
+            m.assert_not_called()
+
+    def test_page_level_text_layer_not_skip(self):
+        # 混合扫描 PDF：文本层可读不构成跳过理由（有文本页也有扫描页，扫描页内容缺失）
+        with mock.patch(_DECIDE_OCR, return_value=_resp("ocr")) as m, \
+             mock.patch("app.graph.decisions._pdf_meta", return_value=(3, 2)):
+            need, trace = decide_ocr_required(
+                scanned_pages=[1], ocr_applied=False, existing_text="第一条 标的：服务器。",
+                pdf_path="/tmp/x.pdf")
+            self.assertTrue(need, "有真实扫描页应需要 OCR，文本层可读不短路")
+            self.assertEqual(trace["status"], "llm")
+            self.assertIn("scanned_pages", trace["signals"])
+            self.assertEqual(trace["signals"]["scanned_pages"], [1])
+
+    def test_page_level_no_images_short_circuit(self):
+        with mock.patch(_DECIDE_OCR) as m, mock.patch("app.graph.decisions._pdf_meta", return_value=(2, 0)):
+            need, trace = decide_ocr_required(scanned_pages=[0], ocr_applied=False, existing_text="")
+            self.assertFalse(need)
+            self.assertEqual(trace["status"], "short_circuit")
+            m.assert_not_called()
+
 
 class TestOcrLlmDecision(unittest.TestCase):
     def test_llm_ocr_need_ocr(self):

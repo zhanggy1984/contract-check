@@ -51,11 +51,13 @@ OCR_PDF_SCHEMA = {
     "type": "function",
     "function": {
         "name": "ocr_pdf",
-        "description": "扫描型 PDF 逐页 OCR 产出文本。返回 {text}。PDF 无文本层时调用。",
+        "description": "扫描型 PDF 指定页 OCR 产出文本。返回 {pages: {页索引: 文本}}。PDF 存在扫描页时按页调用。",
         "parameters": {
             "type": "object",
             "properties": {
                 "pdf_path": {"type": "string", "description": "PDF 存储路径"},
+                "pages": {"type": "array", "items": {"type": "integer"},
+                          "description": "待 OCR 的页索引列表；缺省 = 全部页"},
             },
             "required": ["pdf_path"],
             "additionalProperties": False,

@@ -13,9 +13,11 @@ pdf = sys.argv[1] if len(sys.argv) > 1 else "data/scanned_test.pdf"
 
 print("OcrService.available():", OcrService.available())
 t0 = time.time()
-text = OcrService.ocr_pdf(pdf)
+pages = OcrService.ocr_pdf(pdf)   # {页索引: 文本}
 dt = time.time() - t0
-print(f"OCR 耗时 {dt:.1f}s，识别 {len(text)} 字符")
+print(f"OCR 耗时 {dt:.1f}s，识别 {len(pages)} 页")
 print("--- 识别结果 ---")
-for line in text.splitlines()[:30]:
-    print(line)
+for idx, text in sorted(pages.items()):
+    print(f"[第 {idx} 页]")
+    for line in text.splitlines()[:10]:
+        print(line)

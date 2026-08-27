@@ -94,6 +94,7 @@ def startup() -> None:
     models.Base.metadata.create_all(bind=engine)
     _ensure_column(engine, "check_task", "token_usage_json", "LONGTEXT")
     _ensure_column(engine, "check_task", "decision_json", "LONGTEXT")
+    _ensure_column(engine, "contract_file", "page_texts_json", "LONGTEXT")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
     svc.cleanup_terminal_checkpoints()  # 启动兜底：清理终态任务 checkpoint（T4.3-2）
     files.cleanup_orphan_files()        # 启动兜底：清理孤儿文件（T4.3-3）

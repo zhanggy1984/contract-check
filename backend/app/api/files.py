@@ -1,5 +1,6 @@
 """上传接口：保存文件、提取文本、幂等去重、创建校验任务。"""
 import hashlib
+import json
 import logging
 import time
 from pathlib import Path
@@ -29,10 +30,11 @@ PARSED_DIR = Path("data/parsed")
 STALE_ORPHAN_MINUTES = 60
 
 
-def _extract(ext: str, path: str) -> tuple[str, bool]:
+def _extract(ext: str, path: str) -> tuple[str, list[str] | None]:
+    """提取文本 → (合并文本, 页级文本列表)。PDF 页级提取；DOCX 无页概念返回 None。"""
     if ext == "pdf":
-        return extract_pdf(path)
-    return extract_docx(path), False
+        return extract_pdf(path)   # (text, page_texts)
+    return extract_docx(path), None
 
 
 def cleanup_orphan_files() -> int:
@@ -88,15 +90,19 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
         with open(storage_path, "wb") as f:
             f.write(data)
         try:
-            text, has_scanned = _extract(ext, storage_path)
+            text, page_texts = _extract(ext, storage_path)
         except Exception as e:
             # F4：损坏/非法文件解析失败 → 明确 400，不留 500（残留文件由孤儿清理兜底）
             logger.warning("文件解析失败 %s: %s", storage_path, e)
             raise HTTPException(400, f"文件解析失败：{str(e)[:100]}")
         (PARSED_DIR / f"{sha}.txt").write_text(text or "", encoding="utf-8")
+        # 混合扫描 PDF：页级文本落库为单一事实来源（parse_node 逐页 OCR 用），
+        # has_scanned 由页级派生（存在清洗后为空的页），比整篇判空精确
+        has_scanned = bool(page_texts) and any(not t.strip() for t in page_texts)
         cf = ContractFile(
             file_name=file.filename, file_type=ftype, storage_path=storage_path,
             file_size=len(data), sha256=sha, has_scanned=has_scanned,
+            page_texts_json=json.dumps(page_texts, ensure_ascii=False) if page_texts is not None else None,
         )
         db.add(cf)
         db.commit()

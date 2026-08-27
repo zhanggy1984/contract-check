@@ -70,6 +70,7 @@ class TestParseNode(unittest.TestCase):
             file_size = 1024
             has_scanned = False
             ocr_applied = False
+            page_texts_json = None
 
         task = FakeTask()
         task.contract_file = Cf()
@@ -94,6 +95,7 @@ class TestParseNode(unittest.TestCase):
             file_size = 1024
             has_scanned = True
             ocr_applied = False
+            page_texts_json = None
 
         task = FakeTask()
         task.contract_file = Cf()
@@ -105,10 +107,67 @@ class TestParseNode(unittest.TestCase):
              mock.patch.object(nodes, "decide_ocr_required", return_value=(True, trace)), \
              mock.patch.object(nodes, "registry") as m_reg, \
              mock.patch.object(nodes, "_persist_decisions"):
-            m_reg.execute.return_value = {"text": "OCR 识别文本"}
+            # 历史回退契约：exec_ocr_pdf 返回 {页索引: 文本}，节点按页序合并全文
+            m_reg.execute.return_value = {"pages": {0: "OCR 识别文本"}}
             out = nodes.parse_node(_state())
         self.assertEqual(out["parsed_text"], "OCR 识别文本")
         m_reg.execute.assert_called_once_with("ocr_pdf", pdf_path="/tmp/x.pdf")
+
+    def test_page_level_ocr_uses_pages_contract(self):
+        # 页级 OCR 契约回归：registry 返回 {"pages": ...}，不再有 "text" 键
+        class Cf:
+            sha256 = "abc"
+            storage_path = "/tmp/x.pdf"
+            file_name = "合同.pdf"
+            file_size = 1024
+            has_scanned = True
+            ocr_applied = False
+            page_texts_json = json.dumps(["", "盖章页"], ensure_ascii=False)
+
+        task = FakeTask()
+        task.contract_file = Cf()
+        trace = {"node": "parse", "tool": "decide_ocr", "decision": "ocr", "status": "llm",
+                 "reason": "", "signals": {}, "usage": None, "ts": "t"}
+        with TemporaryDirectory() as td, \
+             mock.patch.object(nodes, "SessionLocal", return_value=FakeSession(task)), \
+             mock.patch.object(nodes, "PARSED_DIR", Path(td)), \
+             mock.patch.object(nodes, "decide_ocr_required", return_value=(True, trace)), \
+             mock.patch.object(nodes, "registry") as m_reg, \
+             mock.patch.object(nodes, "_persist_decisions"):
+            m_reg.execute.return_value = {"pages": {0: "扫描识别文本"}}
+            out = nodes.parse_node(_state())
+        self.assertEqual(out["parsed_text"], "扫描识别文本\n盖章页")
+        m_reg.execute.assert_called_once_with("ocr_pdf", pdf_path="/tmp/x.pdf", pages=[0])
+
+    def test_page_level_ocr_merges_scanned_pages(self):
+        # 混合扫描 PDF：只 OCR 扫描页（pages=[1]），按页序合并，OCR 结果回写 page_texts_json
+        class Cf:
+            sha256 = "abc"
+            storage_path = "/tmp/x.pdf"
+            file_name = "合同.pdf"
+            file_size = 1024
+            has_scanned = True
+            ocr_applied = False
+            page_texts_json = json.dumps(["第一条 标的：服务器。", "", "盖章页"], ensure_ascii=False)
+
+        task = FakeTask()
+        task.contract_file = Cf()
+        trace = {"node": "parse", "tool": "decide_ocr", "decision": "ocr", "status": "llm",
+                 "reason": "", "signals": {}, "usage": None, "ts": "t"}
+        with TemporaryDirectory() as td, \
+             mock.patch.object(nodes, "SessionLocal", return_value=FakeSession(task)), \
+             mock.patch.object(nodes, "PARSED_DIR", Path(td)), \
+             mock.patch.object(nodes, "decide_ocr_required", return_value=(True, trace)) as m_decide, \
+             mock.patch.object(nodes, "registry") as m_reg, \
+             mock.patch.object(nodes, "_persist_decisions"):
+            m_reg.execute.return_value = {"pages": {1: "扫描识别内容"}}
+            out = nodes.parse_node(_state())
+        self.assertEqual(out["parsed_text"], "第一条 标的：服务器。\n扫描识别内容\n盖章页")
+        self.assertIn("scanned_pages", m_decide.call_args.kwargs, "页级路径应传 scanned_pages 判定")
+        m_reg.execute.assert_called_once_with("ocr_pdf", pdf_path="/tmp/x.pdf", pages=[1])
+        # OCR 结果回写 page_texts_json（单一事实来源）+ 标记已 OCR
+        self.assertTrue(task.contract_file.ocr_applied)
+        self.assertEqual(json.loads(task.contract_file.page_texts_json)[1], "扫描识别内容")
 
 
 class TestExtractNode(unittest.TestCase):

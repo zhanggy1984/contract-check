@@ -73,9 +73,17 @@ class TestExecEvaluateSemantic(unittest.TestCase):
 
 class TestExecOcrPdf(unittest.TestCase):
     @mock.patch("app.tools.executors.OcrService")
-    def test_text_returned(self, m):
-        m.ocr_pdf.return_value = "扫描识别文本"
-        self.assertEqual(executors.exec_ocr_pdf("/tmp/x.pdf"), {"text": "扫描识别文本"})
+    def test_pages_returned(self, m):
+        m.ocr_pdf.return_value = {0: "扫描识别文本", 2: "第三页文本"}
+        self.assertEqual(executors.exec_ocr_pdf("/tmp/x.pdf"),
+                         {"pages": {0: "扫描识别文本", 2: "第三页文本"}})
+
+    @mock.patch("app.tools.executors.OcrService")
+    def test_pages_param_passed(self, m):
+        # 混合扫描 PDF：页级 OCR 透传 pages（只识别扫描页）
+        m.ocr_pdf.return_value = {1: "扫描识别文本"}
+        executors.exec_ocr_pdf("/tmp/x.pdf", pages=[1])
+        m.ocr_pdf.assert_called_once_with("/tmp/x.pdf", pages=[1])
 
     @mock.patch("app.tools.executors.OcrService")
     def test_exception_propagates(self, m):
@@ -86,8 +94,9 @@ class TestExecOcrPdf(unittest.TestCase):
     @mock.patch("app.tools.executors.OcrService")
     def test_output_cleaned(self, m):
         # OCR 文本噪声更大，统一过输入清洗（全角/零宽/全角空格）
-        m.ocr_pdf.return_value = "扫描ＡＢＣ" + chr(0x200B) + "识别" + chr(0x3000) + "文本"
-        self.assertEqual(executors.exec_ocr_pdf("/tmp/x.pdf"), {"text": "扫描ABC识别 文本"})
+        m.ocr_pdf.return_value = {0: "扫描ＡＢＣ" + chr(0x200B) + "识别" + chr(0x3000) + "文本"}
+        self.assertEqual(executors.exec_ocr_pdf("/tmp/x.pdf"),
+                         {"pages": {0: "扫描ABC识别 文本"}})
 
 
 class TestExecRunSparql(unittest.TestCase):

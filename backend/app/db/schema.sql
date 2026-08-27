@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS contract_file (
   sha256 CHAR(64) UNIQUE NOT NULL,
   has_scanned TINYINT(1) DEFAULT 0,
   ocr_applied TINYINT(1) DEFAULT 0,
+  page_texts_json LONGTEXT,                    -- 页级文本 JSON（混合扫描 PDF 逐页 OCR 的单一事实来源）
   create_time DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
