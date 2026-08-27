@@ -171,6 +171,9 @@ class SemanticEvaluator:
                 # "规则不适用 SKIPPED/HIGH"与"评估失败 SKIPPED/LOW"），不因单段 LLM 故障炸掉整个任务
                 logger.warning("语义判定 LLM 调用失败 段 %s: %s", idx, e)
                 return {r["rule_iri"]: JudgmentOutcome(r["rule_iri"], None, "LOW", idx) for r in rules}
+            except Exception as e:  # noqa: BLE001 语义尽力而为：非 LLM 意外异常同样降级不炸任务（异常兜底 d1）
+                logger.error("语义判定意外异常 段 %s: %s", idx, e, exc_info=True)
+                return {r["rule_iri"]: JudgmentOutcome(r["rule_iri"], None, "LOW", idx) for r in rules}
             self._add_cost(usage)
             if finish_reason == "length":
                 # 输出被截断：尽量抢救已输出的部分判定（标 LOW 供参考）；无可用内容则重试一次

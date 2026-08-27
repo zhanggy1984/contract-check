@@ -234,6 +234,15 @@ class TestEvaluateSegment(unittest.TestCase):
         self.assertEqual(out["r1"].confidence, "LOW")
         self.assertIsNone(out["r1"].judgment)
 
+    def test_unexpected_error_degrades_to_low(self):
+        # 非 LLM 意外异常（SDK 内部 bug 等）→ 同样降级 LOW 不炸任务，traceback 留日志（异常兜底 d1）
+        seg = _seg("合同约定违约责任。")
+        with patch("app.validation.semantic_evaluator.call_json",
+                   side_effect=RuntimeError("内部异常")):
+            out = self.ev._evaluate_segment(seg, self.rules)
+        self.assertEqual(out["r1"].confidence, "LOW")
+        self.assertIsNone(out["r1"].judgment)
+
     def test_truncated_retry_success(self):
         # 第一次截断 → 重试 → 第二次正常返回 → HIGH（截断不再直接放弃）
         seg = _seg("合同约定违约责任。")

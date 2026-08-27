@@ -17,6 +17,7 @@ from app.config import settings
 from app.db.models import CheckTask, Violation
 from app.db.session import SessionLocal
 from app.graph.decisions import decide_extract_retry, decide_ocr_required
+from app.graph.decision_recorder import make_trace
 from app.graph.state import TaskState
 from app.ontology.loader import load_ontology, register_version
 from app.ontology.rdf_converter import JsonToRdfConverter
@@ -228,10 +229,23 @@ def validate_deterministic(state: TaskState) -> dict:
     return {"det_outcomes": outcomes}
 
 
+def _is_sem_degraded(outcomes: list[dict]) -> bool:
+    """语义评估整体降级：全部规则 SKIPPED 且 confidence 全 LOW（评估失败而非规则不适用）。
+
+    正常业务结论（规则明确不适用 → SKIPPED/HIGH）与真降级（LLM 不可用 → SKIPPED/LOW）
+    由此区分；整体降级时任务仍按无 violation 走 SUCCESS，但须留审计标记（c1）。
+    """
+    if not outcomes:
+        return False
+    return all(o.get("result") == RuleResult.SKIPPED.value and o.get("confidence") == "LOW"
+               for o in outcomes)
+
+
 def validate_semantic(state: TaskState) -> dict:
     """语义校验（T3.2）：SEMANTIC 规则按段批跑，只算不落库。
 
     基于原文 segments（不受抽取 INCOMPLETE 影响）；segments 缺失时全部 SKIPPED 防御。
+    整体降级（LLM 不可用 → 全 SKIPPED/LOW）留决策审计，终态不静默（c1）。
     """
     task_id = state["task_id"]
     with SessionLocal() as db:
@@ -251,17 +265,29 @@ def validate_semantic(state: TaskState) -> dict:
         return {"sem_outcomes": [], "sem_usage": None}
     if not segments:
         # 无分段原文可评 = 评估失败（而非规则不适用），标 LOW 供审计识别
-        return {"sem_outcomes": [
+        outcomes = [
             {"rule_id": r.id, "result": RuleResult.SKIPPED.value, "confidence": "LOW"}
             for r in rules
-        ], "sem_usage": None}
-    r = registry.execute(
-        "evaluate_semantic",
-        segments=segments,
-        rules=[{"id": r.id, "rule_iri": r.rule_iri, "rule_name": r.rule_name,
-                "expression": r.expression, "aggregation": r.aggregation or "any"} for r in rules],
-    )
-    return {"sem_outcomes": r["outcomes"], "sem_usage": r["usage"]}   # 评测契约 usage（B.4），persist 统一落库
+        ]
+        usage = None
+    else:
+        res = registry.execute(
+            "evaluate_semantic",
+            segments=segments,
+            rules=[{"id": rr.id, "rule_iri": rr.rule_iri, "rule_name": rr.rule_name,
+                    "expression": rr.expression, "aggregation": rr.aggregation or "any"} for rr in rules],
+        )
+        outcomes = res["outcomes"]
+        usage = res["usage"]
+    if _is_sem_degraded(outcomes):
+        # 语义评估整体降级（LLM 不可用/段原文缺失）→ 留决策审计 + 日志；终态仍按无 violation 走
+        # SUCCESS（SKIPPED 非 violation，强行 FAILED 会误报），靠 trace/日志区分"没评估"与"真通过"
+        _persist_decisions(task_id, [make_trace(
+            "validate_semantic", "sem_degraded", "degrade", "fallback_error",
+            f"语义评估整体降级：全部 {len(outcomes)} 条规则 SKIPPED/LOW，任务无 violation 但评估不完整",
+            {"sem_rules": len(outcomes)})])
+        logger.warning("任务 %s 语义评估整体降级（%d 条规则全 SKIPPED/LOW）", task_id, len(outcomes))
+    return {"sem_outcomes": outcomes, "sem_usage": usage}   # 评测契约 usage（B.4），persist 统一落库
 
 
 def persist_node(state: TaskState) -> dict:

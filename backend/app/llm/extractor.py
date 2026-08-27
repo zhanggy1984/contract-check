@@ -511,19 +511,22 @@ def extract_contract(text: str, schema: dict[str, Any] | None = None) -> Extract
 def _extract_segments(
     segments: list[str], partial_model: type[BaseModel], schema: dict[str, Any],
     prior_usage: dict[str, int] | None = None,
-) -> tuple[list[dict[str, Any]], bool, dict[str, int] | None]:
-    """分段并行宽松抽取，返回 (parts, any_truncated, usage_agg)。
+) -> tuple[list[dict[str, Any]], bool, list[str], dict[str, int] | None]:
+    """分段并行宽松抽取，返回 (parts, any_truncated, failed, usage_agg)。
 
     线程池并行各段 LLM 调用（sync IO 阻塞，线程池有效；各线程独立 ChatOpenAI client）。
     截断段按 SEGMENT_CHAR_LIMIT//2 真正二分递归降级（#234：旧代码默认 limit=20000，
     _split_text 内 len<=limit 返回 [text]，二分递归是死代码 → 截断段整段丢弃）。
+    failed 记录无结果段（LLM 网络/超时/重试耗尽）的审计信息——异常兜底 b1/b2：
+    不能静默丢段，上层据此降 INCOMPLETE 而非 COMPLETE。
     """
     parts: list[dict[str, Any]] = []
     any_truncated = False
+    failed: list[str] = []
     usage_agg = prior_usage
     with ThreadPoolExecutor(max_workers=min(len(segments), MAX_PARALLEL)) as ex:
         results = list(ex.map(lambda s: _single(s, partial_model, schema), segments))
-    for seg, r in zip(segments, results):  # ex.map 保序
+    for i, (seg, r) in enumerate(zip(segments, results)):  # ex.map 保序
         usage_agg = _merge_usage(usage_agg, r.usage)
         if r.truncated:
             any_truncated = True
@@ -533,10 +536,14 @@ def _extract_segments(
                 usage_agg = _merge_usage(usage_agg, sub_r.usage)
                 if sub_r.obj:
                     parts.append(sub_r.obj)
+                else:
+                    failed.append(f"段{i + 1}: {sub_r.error or '无结果'}")
                 any_truncated = any_truncated or sub_r.truncated
         elif r.obj is not None:
             parts.append(r.obj)
-    return parts, any_truncated, usage_agg
+        else:
+            failed.append(f"段{i + 1}: {r.error or '无结果'}")
+    return parts, any_truncated, failed, usage_agg
 
 
 def extract_contract_segmented(
@@ -545,12 +552,18 @@ def extract_contract_segmented(
 ) -> ExtractionResult:
     """分段抽取：并行分段宽松抽取 → 合并 → 严格校验。prior_usage 为截断降级前已产生的 token（B.4）。"""
     partial_model = build_model(schema, strict=False)
-    parts, any_truncated, usage_agg = _extract_segments(segments, partial_model, schema, prior_usage)
+    parts, any_truncated, failed, usage_agg = _extract_segments(segments, partial_model, schema, prior_usage)
     if not parts:
         return ExtractionResult(None, ExtractionStatus.FAILED.value, segments, any_truncated, "全部分段抽取失败",
                                 token_usage=usage_agg)
     merged, conflicts = _merge_contracts(parts, schema)
     _blank_to_missing(merged, schema)   # 分段合并结果的必填空串同样暴露为缺失
+    if failed:
+        # 部分分段失败（LLM 网络/超时/重试耗尽）：失败段内容静默缺失，即便幸存段凑齐必填
+        # 也不得 COMPLETE——降 INCOMPLETE（跳过确定性校验）+ 失败段 error 审计（异常兜底 b1/b2）
+        return ExtractionResult(merged, ExtractionStatus.INCOMPLETE.value, segments, any_truncated,
+                                f"部分分段抽取失败: {'; '.join(failed)}",
+                                conflicts=conflicts, token_usage=usage_agg)
     try:
         valid = full_model.model_validate(merged)
         return ExtractionResult(valid.model_dump(mode="json"), ExtractionStatus.COMPLETE.value,

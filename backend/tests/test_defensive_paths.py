@@ -284,5 +284,74 @@ class TestExtractLLMError(unittest.TestCase):
         self.assertEqual(r.error, "全部分段抽取失败")
 
 
+class TestSegmentedPartialFailure(unittest.TestCase):
+    """b1/b2：分段抽取部分段 LLM 失败 → 不得静默 COMPLETE（丢段内容），降 INCOMPLETE 且 error 带失败段审计。"""
+
+    def test_partial_segment_failure_incomplete(self):
+        from app.llm.extractor import build_model, extract_contract_segmented
+        from app.ontology.loader import load_ontology
+        from app.ontology.schema_mapper import build_extraction_schema
+
+        schema = build_extraction_schema(load_ontology())
+        model = build_model(schema, strict=True)
+        segs = ["第一条 标的：服务器壹台。", "第二条 违约责任：违约方赔偿损失。"]
+
+        def fake_call_json(system, user):
+            if "第二条" in user:
+                raise LLMError("连接超时")
+            return (VALID_JSON, "stop", None)
+
+        with patch.object(extractor, "call_json", side_effect=fake_call_json):
+            r = extract_contract_segmented("", schema, segs, model)
+        self.assertEqual(r.status, "INCOMPLETE", "部分段失败不得静默 COMPLETE")
+        self.assertIn("部分分段抽取失败", r.error or "", "error 应标记部分失败")
+        self.assertIn("段2", r.error or "", "error 应含失败段号，供审计定位")
+
+    def test_all_segments_ok_stays_complete(self):
+        # 对照组：全段正常 → 仍是 COMPLETE（b1/b2 不改变正常路径）
+        from app.llm.extractor import build_model, extract_contract_segmented
+        from app.ontology.loader import load_ontology
+        from app.ontology.schema_mapper import build_extraction_schema
+
+        schema = build_extraction_schema(load_ontology())
+        model = build_model(schema, strict=True)
+        segs = ["第一条 标的：服务器壹台。", "第二条 违约责任：违约方赔偿损失。"]
+
+        with patch.object(extractor, "call_json", return_value=(VALID_JSON, "stop", None)):
+            r = extract_contract_segmented("", schema, segs, model)
+        self.assertEqual(r.status, "COMPLETE")
+        self.assertIsNone(r.error, "全段正常不应带部分失败 error")
+
+
+class TestSemDegraded(unittest.TestCase):
+    """c1：语义评估整体降级判定（全 SKIPPED/LOW = 评估失败，区别于规则不适用 SKIPPED/HIGH）。"""
+
+    def _is_degraded(self, outcomes):
+        from app.graph.nodes import _is_sem_degraded
+        return _is_sem_degraded(outcomes)
+
+    def test_all_skipped_low(self):
+        self.assertTrue(self._is_degraded([
+            {"rule_id": 1, "result": "SKIPPED", "confidence": "LOW"},
+            {"rule_id": 2, "result": "SKIPPED", "confidence": "LOW"},
+        ]), "全部规则 SKIPPED/LOW = 评估整体降级")
+
+    def test_any_high_not_degraded(self):
+        # 规则明确不适用 → SKIPPED/HIGH → 正常业务结论，非降级
+        self.assertFalse(self._is_degraded([
+            {"rule_id": 1, "result": "SKIPPED", "confidence": "LOW"},
+            {"rule_id": 2, "result": "SKIPPED", "confidence": "HIGH"},
+        ]))
+
+    def test_any_fail_not_degraded(self):
+        # 有真实 FAIL（violation）→ 非整体降级
+        self.assertFalse(self._is_degraded([
+            {"rule_id": 1, "result": "FAIL", "confidence": "LOW"},
+        ]))
+
+    def test_empty_not_degraded(self):
+        self.assertFalse(self._is_degraded([]), "无语义规则不标记降级")
+
+
 if __name__ == "__main__":
     unittest.main()
