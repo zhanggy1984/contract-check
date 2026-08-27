@@ -4,6 +4,7 @@
 run_sparql 的 graph/rule 允许原生对象传入（rdflib 图 / ORM 规则对象不可 JSON 化），
 出参仍为 dict。决策 executor 是薄壳（只归一化参数），真实决策逻辑在 app/graph/decisions.py。
 """
+import unicodedata
 from dataclasses import asdict
 
 from app.llm.extractor import extract_contract
@@ -48,11 +49,38 @@ def exec_run_sparql(graph, rule) -> dict:
 
 # ---- 决策 executor（薄壳：仅参数归一化，决策逻辑在 decisions.py）----
 
-def exec_decide_ocr(action: str, reason: str) -> dict:
-    """LLM decide_ocr 决策结果归一化。"""
-    return {"action": action, "reason": reason or ""}
+def _normalize_action(raw, allowed: set[str]) -> str | None:
+    """LLM 返回 action 归一化：NFKC 全角转半角 / 去首尾空白 / 小写 / 去结尾标点
+    → 命中 allowed 返回规范化值；非法返回 None（上游保守兜底，不猜值）。
+    防御 LLM 返回 "skip。" / "Skip" / "ocr " 等噪声导致 decisions.py 判断失效。"""
+    if not isinstance(raw, str):
+        return None
+    a = unicodedata.normalize("NFKC", raw).strip().lower()
+    a = a.rstrip("。.！!？?；; ").strip()
+    return a if a in allowed else None
 
 
-def exec_decide_extract_retry(action: str, reason: str) -> dict:
-    """LLM decide_extract_retry 决策结果归一化。"""
-    return {"action": action, "reason": reason or ""}
+def _clean_reason(raw, max_len: int = 200) -> str:
+    """reason 清洗：非 str 归 ""，strip，超长截断（防 LLM 废话污染 traces/DB）。"""
+    if not isinstance(raw, str):
+        return ""
+    r = raw.strip()
+    return r[:max_len] if len(r) > max_len else r
+
+
+def _decide_shell(action, reason, allowed: set[str]) -> dict:
+    """决策薄壳共享实现：action 严格匹配 allowed（非法→None 上游兜底），reason 清洗截断。
+    invalid_action 保留 LLM 原始值（含噪声）供审计，action 合法时恒为 None。"""
+    a = _normalize_action(action, allowed)
+    return {"action": a, "reason": _clean_reason(reason),
+            "invalid_action": action if a is None else None}
+
+
+def exec_decide_ocr(action, reason) -> dict:
+    """LLM decide_ocr 决策结果归一化（action 严格 ocr/skip，非法→None 上游兜底）。"""
+    return _decide_shell(action, reason, {"ocr", "skip"})
+
+
+def exec_decide_extract_retry(action, reason) -> dict:
+    """LLM decide_extract_retry 决策结果归一化（action 严格 retry/fail）。"""
+    return _decide_shell(action, reason, {"retry", "fail"})

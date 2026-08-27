@@ -88,12 +88,15 @@ DECIDE_OCR_SCHEMA = {
         "name": "decide_ocr",
         "description": "判断扫描型 PDF 是否值得执行 OCR（OCR 分钟级、可能超时）。action=ocr 表示值得执行；"
                        "action=skip 表示文本层已可读或质量过低不值得 OCR（下游将快速失败）。"
-                       "仅当文件被标记为扫描件（has_scanned）且当前无可用文本时才需要调用。",
+                       "仅当文件被标记为扫描件（has_scanned）且当前无可用文本时才需要调用。"
+                       "action 必须严格等于 ocr 或 skip，不要附加标点、空格、引号或大小写变体，"
+                       "否则视为无效决策；reason 简明客观，只写判断依据，不超过 200 字。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["ocr", "skip"]},
-                "reason": {"type": "string", "description": "判断依据（文件信号：页数/图片数/文本长度等）"},
+                "reason": {"type": "string", "maxLength": 200,
+                           "description": "判断依据（文件信号：页数/图片数/文本长度等）"},
             },
             "required": ["action", "reason"],
             "additionalProperties": False,
@@ -106,12 +109,15 @@ DECIDE_EXTRACT_RETRY_SCHEMA = {
     "function": {
         "name": "decide_extract_retry",
         "description": "合同抽取失败后决定是否重试一次还是放弃。action=retry 表示值得用同一文本重抽一次；"
-                       "action=fail 表示放弃（任务将标记失败）。仅当抽取返回 FAILED 时调用。",
+                       "action=fail 表示放弃（任务将标记失败）。仅当抽取返回 FAILED 时调用。"
+                       "action 必须严格等于 retry 或 fail，不要附加标点、空格、引号或大小写变体，"
+                       "否则视为无效决策；reason 简明客观，只写判断依据，不超过 200 字。",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["retry", "fail"]},
-                "reason": {"type": "string", "description": "判断依据（失败原因分类 + 文本统计）"},
+                "reason": {"type": "string", "maxLength": 200,
+                           "description": "判断依据（失败原因分类 + 文本统计）"},
             },
             "required": ["action", "reason"],
             "additionalProperties": False,

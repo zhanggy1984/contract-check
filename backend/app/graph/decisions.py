@@ -120,8 +120,9 @@ def decide_ocr_required(*, has_scanned: bool, ocr_applied: bool, existing_text: 
     try:
         d = _decide(OCR_SYSTEM_PROMPT, user, "decide_ocr")
         if d.action is None:
+            reason = f"LLM 返回非法 action 值: {d.invalid_action!r}" if d.invalid_action else "LLM 未返回工具调用"
             return legacy, make_trace("parse", "decide_ocr", "ocr", "fallback_error",
-                                      "LLM 未返回工具调用", signals, d.last_usage)
+                                      reason, signals, d.last_usage)
         if d.action == "skip" and settings.ocr_decision_allow_llm_skip:
             return False, make_trace("parse", "decide_ocr", "skip", "llm", d.reason, signals, d.usage)
         # LLM ocr、或 skip 但保守开关未放开 → 执行仍强制 OCR
@@ -155,8 +156,9 @@ def decide_extract_retry(*, text: str, result_status: str, error: str | None,
     try:
         d = _decide(EXTRACT_SYSTEM_PROMPT, user, "decide_extract_retry")
         if d.action is None:
+            reason = f"LLM 返回非法 action 值: {d.invalid_action!r}" if d.invalid_action else "LLM 未返回工具调用"
             return "fail", make_trace("extract", "decide_extract_retry", "fail", "fallback_error",
-                                      "LLM 未返回工具调用", signals, d.last_usage)
+                                      reason, signals, d.last_usage)
         return d.action, make_trace("extract", "decide_extract_retry", d.action, "llm",
                                     d.reason, signals, d.usage)
     except Exception as e:  # noqa: BLE001
@@ -187,11 +189,13 @@ def _is_truncated(error: str | None) -> bool:
 
 @dataclass(frozen=True)
 class _DecisionResult:
-    """单决策点输出。action=None 表示 LLM 未给出可用决策（无匹配工具调用）。"""
+    """单决策点输出。action=None 表示 LLM 未给出可用决策（未调用工具或 action 非法）。
+    invalid_action 记录 LLM 返回的非法原始 action 值，供 trace 审计区分两种情况。"""
     action: str | None
     reason: str = ""
     usage: dict | None = None
     last_usage: dict | None = None   # 未决策时最后轮的 usage（兜底 trace 审计用）
+    invalid_action: str | None = None
 
 
 def _decide(system: str, user: str, tool_name: str) -> _DecisionResult:
@@ -207,8 +211,11 @@ def _decide(system: str, user: str, tool_name: str) -> _DecisionResult:
         last_usage = resp.usage
         for tc in resp.tool_calls:
             if tc.name == tool_name:
-                result = registry.execute(tc.name, **tc.arguments)  # 薄壳归一化 {action, reason}
-                return _DecisionResult(result.get("action"), result.get("reason", ""), resp.usage)
+                result = registry.execute(tc.name, **tc.arguments)  # 薄壳归一化 {action, reason, invalid_action}
+                return _DecisionResult(
+                    action=result.get("action"), reason=result.get("reason", ""),
+                    usage=resp.usage, invalid_action=result.get("invalid_action"),
+                )
         if resp.finish_reason != "length":
             # 正常结束但未调工具 → 补一轮提示；仍不调则放弃
             if i >= settings.tool_decision_max_rounds - 1:

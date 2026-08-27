@@ -108,16 +108,47 @@ class TestExecRunSparql(unittest.TestCase):
 
 class TestDecisionThinShells(unittest.TestCase):
     def test_exec_decide_ocr_normalizes(self):
-        self.assertEqual(executors.exec_decide_ocr("ocr", "文本层可读"), {"action": "ocr", "reason": "文本层可读"})
+        # 干净输入：action 原样返回，invalid_action 恒为 None
+        self.assertEqual(executors.exec_decide_ocr("ocr", "文本层可读"),
+                         {"action": "ocr", "reason": "文本层可读", "invalid_action": None})
 
     def test_exec_decide_ocr_reason_empty_default(self):
-        self.assertEqual(executors.exec_decide_ocr("skip", None), {"action": "skip", "reason": ""})
+        self.assertEqual(executors.exec_decide_ocr("skip", None),
+                         {"action": "skip", "reason": "", "invalid_action": None})
 
     def test_exec_decide_extract_retry_normalizes(self):
         self.assertEqual(
             executors.exec_decide_extract_retry("fail", "文本过短"),
-            {"action": "fail", "reason": "文本过短"},
+            {"action": "fail", "reason": "文本过短", "invalid_action": None},
         )
+
+    def test_action_noise_normalized(self):
+        # LLM 返回带噪声 action：结尾标点/大小写/空白/全角 → 归一化命中 enum
+        # （修复点：原样透传时 "skip。"/"Skip" 会让 decisions.py 判断失效走保守兜底）
+        cases = [
+            (executors.exec_decide_ocr, {"skip。": "skip", "Skip": "skip", "ocr ": "ocr", "ｓｋｉｐ": "skip"}),
+            (executors.exec_decide_extract_retry, {" retry\n": "retry", "FAIL！": "fail"}),
+        ]
+        for fn, mapping in cases:
+            for noisy, expected in mapping.items():
+                with self.subTest(fn=fn.__name__, noisy=noisy):
+                    r = fn(noisy, "理由")
+                    self.assertEqual(r["action"], expected)
+                    self.assertIsNone(r["invalid_action"])
+
+    def test_action_invalid_falls_back_none(self):
+        # 非法值 → action=None 上游保守兜底，invalid_action 保留原始值供审计
+        for bad in ("maybe", "123", "skip？skip", None, 123, ""):
+            with self.subTest(bad=bad):
+                r = executors.exec_decide_ocr(bad, "理由")
+                self.assertIsNone(r["action"])
+                self.assertEqual(r["invalid_action"], bad)
+
+    def test_reason_cleaned(self):
+        # reason 清洗：去首尾空白 + 超长截断 200（防 LLM 废话污染 traces/DB）
+        self.assertEqual(executors.exec_decide_ocr("skip", "理" * 250)["reason"], "理" * 200)
+        self.assertEqual(executors.exec_decide_ocr("skip", "  理由  ")["reason"], "理由")
+        self.assertEqual(executors.exec_decide_ocr("skip", None)["reason"], "")
 
 
 if __name__ == "__main__":
