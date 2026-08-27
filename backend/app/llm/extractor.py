@@ -19,6 +19,7 @@ from app.llm.injection import guard_text
 from app.llm.llm_client import call_json
 from app.ontology.loader import load_ontology
 from app.ontology.schema_mapper import build_extraction_schema
+from app.parser.text_cleaner import clean_text
 
 # 超过此字符数才判定为"超长合同"走分段抽取；短于此直接单段（短合同行为不受分块阈值影响）
 SINGLE_SEGMENT_CHAR_LIMIT = 20000
@@ -471,6 +472,9 @@ def _fallback_title(text: str, current: str | None = None) -> str | None:
 
 def extract_contract(text: str, schema: dict[str, Any] | None = None) -> ExtractionResult:
     """合同全文抽取。入口：整篇或分段，返回标准文本 JSON + 抽取状态。"""
+    # 兜底清洗：parser/OCR 已在提取侧清洗，此处保证任何来源的文本进 LLM 前必净
+    # （未来新文本入口若绕过 parser 仍有此防线；clean_text 幂等，重复清洗无开销）
+    text = clean_text(text)
     schema = schema or build_extraction_schema(load_ontology())
     stripped = text.strip()
     if len(stripped) < MIN_TEXT_CHARS:

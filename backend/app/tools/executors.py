@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from app.llm.extractor import extract_contract
 from app.ocr.ocr_service import OcrService
+from app.parser.text_cleaner import clean_text
 from app.validation.semantic_evaluator import SemanticEvaluator
 from app.validation.sparql_executor import SparqlExecutor
 
@@ -35,7 +36,8 @@ def exec_evaluate_semantic(segments: list, rules: list) -> dict:
 
 def exec_ocr_pdf(pdf_path: str) -> dict:
     """扫描 PDF OCR → 文本。PaddleOCR 未安装/异常时抛 RuntimeError（上游决定降级）。"""
-    return {"text": OcrService.ocr_pdf(pdf_path)}
+    # OCR 文本噪声更大（全角/零宽/多余空白），统一过输入清洗，与文本层提取一致
+    return {"text": clean_text(OcrService.ocr_pdf(pdf_path))}
 
 
 def exec_run_sparql(graph, rule) -> dict:

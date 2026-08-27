@@ -83,6 +83,12 @@ class TestExecOcrPdf(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             executors.exec_ocr_pdf("/tmp/x.pdf")
 
+    @mock.patch("app.tools.executors.OcrService")
+    def test_output_cleaned(self, m):
+        # OCR 文本噪声更大，统一过输入清洗（全角/零宽/全角空格）
+        m.ocr_pdf.return_value = "扫描ＡＢＣ" + chr(0x200B) + "识别" + chr(0x3000) + "文本"
+        self.assertEqual(executors.exec_ocr_pdf("/tmp/x.pdf"), {"text": "扫描ABC识别 文本"})
+
 
 class TestExecRunSparql(unittest.TestCase):
     @mock.patch("app.tools.executors.SparqlExecutor")
