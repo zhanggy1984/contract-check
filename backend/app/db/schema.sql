@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS check_task (
   segments_json LONGTEXT,
   extraction_conflicts LONGTEXT,       -- 分段抽取跨段字段冲突 JSON 数组
   token_usage_json LONGTEXT,           -- 评测契约 usage 聚合（抽取+语义 LLM token，B.4）
+  decision_json LONGTEXT,              -- 决策痕迹列表（function calling 决策引擎，契约隔离）
   create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_check_task_status (status),

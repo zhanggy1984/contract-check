@@ -79,6 +79,8 @@ def get_task_result(task_id: int, db: Session = Depends(get_db)):
         "usage": json.loads(task.token_usage_json) if task.token_usage_json else None,
         "timing": _task_timing(task),
         "tool_calls": [_rule_result_to_tool(r, rule_names.get(r.rule_id)) for r in results],
+        # 决策痕迹（function calling 决策引擎）：独立顶层键，与 tool_calls/usage 零关联
+        "decisions": json.loads(task.decision_json) if task.decision_json else [],
         # meta（§5.2 同步变体）：对齐 SSE 首帧 meta（agent/model/interface/contract_version）。
         # 7.3 修复：缺 model → 平台 eval_result.model=None → model_price 查不到 → 成本列缺失。
         "meta": {

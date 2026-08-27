@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # 任务执行超时（秒）：图执行超过该值标记 FAILED（软超时，后台线程继续跑真实结果）
     task_timeout_seconds: int = 600
 
+    # 工具决策（function calling 决策引擎，见 app/graph/decisions.py）
+    tool_decision_enabled: bool = True            # 决策引擎总开关（False = 零决策调用，回退旧行为）
+    ocr_decision_enabled: bool = True             # OCR 决策点开关
+    ocr_decision_allow_llm_skip: bool = False     # 保守：LLM skip 不生效，执行仍强制 OCR
+    extract_decision_allow_llm_retry: bool = False  # 保守：LLM retry 不生效，执行仍 FAILED
+    tool_decision_max_rounds: int = 2             # 单决策点最大工具轮次（防循环）
+    tool_decision_max_tokens: int = 1024          # 决策调用 max_tokens（话术短，无需 8192）
+    tool_decision_timeout: int = 30               # 决策调用超时（秒）
+
     # 说明：从 backend/ 目录启动 uvicorn，env_file 相对路径指向 backend/.env
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -16,17 +16,16 @@ from app.common.errors import TaskCancelledError
 from app.config import settings
 from app.db.models import CheckTask, Violation
 from app.db.session import SessionLocal
+from app.graph.decisions import decide_extract_retry, decide_ocr_required
 from app.graph.state import TaskState
-from app.llm.extractor import extract_contract
-from app.ocr.ocr_service import OcrService
 from app.ontology.loader import load_ontology, register_version
 from app.ontology.rdf_converter import JsonToRdfConverter
 from app.ontology.schema_mapper import build_extraction_schema
 from app.parser.segment_splitter import split_segments
 from app.service.rule_service import get_enabled_rules, sync_rules
+from app.tools import registry
 from app.validation.persist import RuleOutcome, persist_results
-from app.validation.semantic_evaluator import SemanticEvaluator
-from app.validation.sparql_executor import SparqlExecutor, build_graph
+from app.validation.sparql_executor import build_graph
 
 PARSED_DIR = Path("data/parsed")
 
@@ -67,6 +66,25 @@ def _merge_usage(a: dict | None, b: dict | None) -> dict | None:
     }
 
 
+def _persist_decisions(task_id: int, traces: list) -> None:
+    """决策痕迹即时落库（不经 checkpoint：抽取失败等 FAILED 分支任务失败也能保痕）。
+
+    与现有 decision_json 合并追加；纯审计数据，落库失败静默降级，不影响主流程。
+    """
+    if not traces:
+        return
+    try:
+        with SessionLocal() as db:
+            task = db.get(CheckTask, task_id)
+            if task is None:
+                return
+            existing = json.loads(task.decision_json) if task.decision_json else []
+            task.decision_json = json.dumps(existing + traces, ensure_ascii=False)
+            db.commit()
+    except Exception:  # noqa: BLE001 审计数据落库失败不阻断主流程
+        logger.warning("决策痕迹落库失败 task_id=%s", task_id)
+
+
 def parse_node(state: TaskState) -> dict:
     """读取已解析文本并置 PARSING；扫描件（无文本层）在此触发 OCR（T4.1）；CANCELLED 时短路。
 
@@ -83,13 +101,20 @@ def parse_node(state: TaskState) -> dict:
         db.commit()
         cf = task.contract_file
         sha = cf.sha256
-        need_ocr = bool(cf.has_scanned) and not cf.ocr_applied
         storage_path = cf.storage_path
+        file_name, file_size = cf.file_name, cf.file_size
+        has_scanned, ocr_applied = bool(cf.has_scanned), bool(cf.ocr_applied)
 
     txt = PARSED_DIR / f"{sha}.txt"
     text = txt.read_text(encoding="utf-8") if txt.exists() else ""
+    # 受约束 OCR 决策：确定性否决权优先，LLM 仅歧义场景判断；保守模式执行与旧版一致
+    need_ocr, ocr_trace = decide_ocr_required(
+        has_scanned=has_scanned, ocr_applied=ocr_applied,
+        existing_text=text, pdf_path=storage_path, file_name=file_name, file_size=file_size,
+    )
+    _persist_decisions(state["task_id"], [ocr_trace])
     if need_ocr:
-        text = OcrService.ocr_pdf(storage_path)
+        text = registry.execute("ocr_pdf", pdf_path=storage_path)["text"]
         txt.write_text(text, encoding="utf-8")
         with SessionLocal() as db:
             db.get(CheckTask, state["task_id"]).contract_file.ocr_applied = True
@@ -116,31 +141,42 @@ def extract_node(state: TaskState) -> dict:
         db.commit()
 
     schema = build_extraction_schema(load_ontology())
-    result = extract_contract(state["parsed_text"], schema)
-    if result.status == ExtractionStatus.FAILED.value:
-        raise RuntimeError(f"抽取失败: {result.error}")
+    result = registry.execute("extract_contract", text=state["parsed_text"], schema=schema)
+    if result["status"] == ExtractionStatus.FAILED.value:
+        # 受约束失败处置决策：LLM 判断是否重试，决策痕迹即时落库不丢。
+        # 执行权：仅当开关放开且 LLM 建议 retry 才重试一次（防循环硬上限），否则任务 FAILED
+        action, extract_trace = decide_extract_retry(
+            text=state["parsed_text"], result_status=result["status"],
+            error=result["error"], std_json=result["std_json"],
+        )
+        _persist_decisions(task_id, [extract_trace])
+        if not (settings.extract_decision_allow_llm_retry and action == "retry"):
+            raise RuntimeError(f"抽取失败: {result['error']}")
+        result = registry.execute("extract_contract", text=state["parsed_text"], schema=schema)
+        if result["status"] == ExtractionStatus.FAILED.value:
+            raise RuntimeError(f"抽取失败: {result['error']}")
 
     segments = split_segments(state["parsed_text"])
     rdf_nt = ""
-    if result.std_json:
-        rdf_nt = JsonToRdfConverter(schema).convert(result.std_json, task_id)
+    if result["std_json"]:
+        rdf_nt = JsonToRdfConverter(schema).convert(result["std_json"], task_id)
 
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
-        task.extraction_status = result.status
-        task.standard_json = json.dumps(result.std_json, ensure_ascii=False) if result.std_json else None
+        task.extraction_status = result["status"]
+        task.standard_json = json.dumps(result["std_json"], ensure_ascii=False) if result["std_json"] else None
         task.segments_json = json.dumps(segments, ensure_ascii=False)
         task.extraction_rdf = rdf_nt or None
-        task.extraction_conflicts = json.dumps(result.conflicts, ensure_ascii=False) if result.conflicts else None
+        task.extraction_conflicts = json.dumps(result["conflicts"], ensure_ascii=False) if result["conflicts"] else None
         task.progress = 60
         db.commit()
 
     return {
-        "extraction_json": result.std_json,
-        "extraction_status": result.status,
+        "extraction_json": result["std_json"],
+        "extraction_status": result["status"],
         "extraction_rdf": rdf_nt,
         "segments": segments,
-        "extraction_usage": result.token_usage,   # 评测契约 usage（B.4），persist 统一落库
+        "extraction_usage": result["token_usage"],   # 评测契约 usage（B.4），persist 统一落库
     }
 
 
@@ -177,19 +213,18 @@ def validate_deterministic(state: TaskState) -> dict:
             runnable, skippable = rules, []
 
     graph = build_graph(rdf_nt) if runnable else None
-    executor = SparqlExecutor()
     outcomes: list[dict] = []
     for rule in skippable:
         outcomes.append({"rule_id": rule.id, "result": RuleResult.SKIPPED.value, "subjects": []})
     for rule in runnable:
-        res = executor.run(graph, rule)
-        if res.passed:
+        res = registry.execute("run_sparql", graph=graph, rule=rule)
+        if res["passed"]:
             result = RuleResult.PASS.value
-        elif res.subjects:
+        elif res["subjects"]:
             result = RuleResult.FAIL.value
         else:
             result = RuleResult.SKIPPED.value   # 空图无反例可判（防御）
-        outcomes.append({"rule_id": rule.id, "result": result, "subjects": res.subjects})
+        outcomes.append({"rule_id": rule.id, "result": result, "subjects": res["subjects"]})
     return {"det_outcomes": outcomes}
 
 
@@ -220,18 +255,13 @@ def validate_semantic(state: TaskState) -> dict:
             {"rule_id": r.id, "result": RuleResult.SKIPPED.value, "confidence": "LOW"}
             for r in rules
         ], "sem_usage": None}
-    evaluator = SemanticEvaluator()
-    results = evaluator.evaluate(
-        segments,
-        [{"id": r.id, "rule_iri": r.rule_iri, "rule_name": r.rule_name,
-          "expression": r.expression, "aggregation": r.aggregation or "any"} for r in rules],
+    r = registry.execute(
+        "evaluate_semantic",
+        segments=segments,
+        rules=[{"id": r.id, "rule_iri": r.rule_iri, "rule_name": r.rule_name,
+                "expression": r.expression, "aggregation": r.aggregation or "any"} for r in rules],
     )
-    return {"sem_outcomes": [
-        {"rule_id": o.rule_id, "result": o.result, "message": o.message,
-         "evidence_text": o.evidence_text, "segment_ref": o.segment_ref,
-         "confidence": o.confidence}
-        for o in results
-    ], "sem_usage": evaluator.usage}   # 评测契约 usage（B.4），persist 统一落库
+    return {"sem_outcomes": r["outcomes"], "sem_usage": r["usage"]}   # 评测契约 usage（B.4），persist 统一落库
 
 
 def persist_node(state: TaskState) -> dict:
