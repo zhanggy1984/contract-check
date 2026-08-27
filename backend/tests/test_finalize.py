@@ -31,10 +31,16 @@ class _FakeViolationQuery:
         return object() if self.has_confirmed else None
 
 
+class _FakeResult:
+    def __init__(self, rowcount):
+        self.rowcount = rowcount
+
+
 class _FakeSession:
-    def __init__(self, task, has_confirmed):
+    def __init__(self, task, has_confirmed, rowcount=1):
         self.task = task
         self.has_confirmed = has_confirmed
+        self.rowcount = rowcount
 
     def __enter__(self):
         return self
@@ -47,6 +53,16 @@ class _FakeSession:
 
     def query(self, expr, *a, **k):
         return _FakeViolationQuery(self.has_confirmed)
+
+    def execute(self, stmt, *a, **k):
+        # mock 条件更新：CAS 命中（rowcount>0）时把 stmt values 应用到 task，
+        # 模拟真实 SQL 效果（不触 DB）；rowcount=0（外部终态已落库）则不应用不覆盖
+        if self.rowcount > 0:
+            for key, bv in (getattr(stmt, "_values", None) or {}).items():
+                col = getattr(key, "name", key)   # ORM Update._values 键是 Column 对象
+                if col in ("status", "progress"):
+                    setattr(self.task, col, getattr(bv, "value", bv))
+        return _FakeResult(self.rowcount)
 
     def commit(self):
         pass

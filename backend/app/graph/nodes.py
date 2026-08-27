@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from langgraph.types import interrupt
+from sqlalchemy import update
 from sqlalchemy.exc import OperationalError
 
 from app.common.constants import ExtractionStatus, RuleResult, RuleType, TaskStatus, ViolationStatus
@@ -43,6 +44,12 @@ def _is_deadlock(e: OperationalError) -> bool:
     args = getattr(e.orig, "args", ()) if e.orig is not None else ()
     return bool(args) and args[0] in (1213, 40001)
 
+
+# 外部标记的终态（超时 FAILED / 取消 CANCELLED / 定稿 SUCCESS）：
+# 图执行遇此状态必须终止，防僵尸线程（软超时后无法中断的 to_thread）继续执行覆盖判定
+_TERMINAL_STATUSES = (
+    TaskStatus.FAILED.value, TaskStatus.SUCCESS.value, TaskStatus.CANCELLED.value,
+)
 
 # 规则种类从 rule_iri 解析：urn:rule:{kind}:...（本体生成 required/enum/min/pattern，人工 manual）
 _RULE_KIND_RE = re.compile(r"^urn:rule:([a-z]+):")
@@ -86,6 +93,22 @@ def _persist_decisions(task_id: int, traces: list) -> None:
         logger.warning("决策痕迹落库失败 task_id=%s", task_id)
 
 
+def _ensure_runnable(db, task, task_id: int) -> None:
+    """节点入口终态短路（T4.3 review P1 僵尸线程防覆盖）。
+
+    软超时（check_task_service.run_task_async）后 to_thread 图线程无法中断，若不拦会继续
+    执行后续节点，把外部判定（超时 FAILED / 取消 CANCELLED）覆盖成中间态、WAITING_REVIEW
+    或 SUCCESS，掩埋超时事实。CANCELLED → TaskCancelledError（保留置 CANCELLED 语义）；
+    FAILED/SUCCESS → RuntimeError（终态已判定，忽略僵尸图执行——其异常无人捕获，不会二次改状态）。
+    """
+    if task is None:
+        raise RuntimeError(f"任务 {task_id} 不存在")
+    if task.status == TaskStatus.CANCELLED.value:
+        raise TaskCancelledError("任务已取消")
+    if task.status in _TERMINAL_STATUSES:
+        raise RuntimeError(f"任务已被外部标记 {task.status}，忽略僵尸图执行")
+
+
 def parse_node(state: TaskState) -> dict:
     """读取已解析文本并置 PARSING；扫描页（无文本层）在此触发 OCR（T4.1）；CANCELLED 时短路。
 
@@ -96,10 +119,7 @@ def parse_node(state: TaskState) -> dict:
     """
     with SessionLocal() as db:
         task = db.get(CheckTask, state["task_id"])
-        if task is None:
-            raise RuntimeError(f"任务 {state['task_id']} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
+        _ensure_runnable(db, task, state["task_id"])
         task.status = TaskStatus.PARSING.value
         task.progress = 20
         db.commit()
@@ -161,10 +181,7 @@ def extract_node(state: TaskState) -> dict:
     task_id = state["task_id"]
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
-        if task is None:
-            raise RuntimeError(f"任务 {task_id} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
+        _ensure_runnable(db, task, task_id)
         task.status = TaskStatus.EXTRACTING.value
         task.progress = 40
         task.llm_model = settings.deepseek_model
@@ -223,10 +240,7 @@ def validate_deterministic(state: TaskState) -> dict:
     task_id = state["task_id"]
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
-        if task is None:
-            raise RuntimeError(f"任务 {task_id} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
+        _ensure_runnable(db, task, task_id)
         task.status = TaskStatus.VALIDATING.value
         task.progress = 70
         db.commit()
@@ -280,10 +294,7 @@ def validate_semantic(state: TaskState) -> dict:
     task_id = state["task_id"]
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
-        if task is None:
-            raise RuntimeError(f"任务 {task_id} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
+        _ensure_runnable(db, task, task_id)
         task.progress = 78
         db.commit()
         ovid = task.ontology_version_id
@@ -339,10 +350,7 @@ def _persist_once(state: TaskState, task_id: int, det: list, sem: list) -> dict:
     """单次事务：usage 落库 + 幂等写 rule_check_result + violation（死锁由 persist_node 重试整事务）。"""
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
-        if task is None:
-            raise RuntimeError(f"任务 {task_id} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
+        _ensure_runnable(db, task, task_id)
         rules = {r.id: r for r in get_enabled_rules(db, task.ontology_version_id)}
         outcomes: list[RuleOutcome] = []
         for o in det:
@@ -368,16 +376,24 @@ def _persist_once(state: TaskState, task_id: int, det: list, sem: list) -> dict:
 
 
 def mark_waiting(state: TaskState) -> dict:
-    """校验结果就绪，进入待人工审核（WAITING_REVIEW 由本节点置，不在纯节点内写状态）。"""
+    """校验结果就绪，进入待人工审核（WAITING_REVIEW 由本节点置，不在纯节点内写状态）。
+
+    僵尸线程防覆盖（T4.3 review P1）：本节点是"写状态后即 interrupt 停驻"的节点，
+    入口检查拦不住与外部判定（超时 FAILED）的节点内竞态——用条件更新（CAS）
+    WHERE status NOT IN 终态，外部终态已落库则 rowcount=0，抛异常终止图（不写 checkpoint）。
+    """
+    task_id = state["task_id"]
     with SessionLocal() as db:
-        task = db.get(CheckTask, state["task_id"])
-        if task is None:
-            raise RuntimeError(f"任务 {state['task_id']} 不存在")
-        if task.status == TaskStatus.CANCELLED.value:
-            raise TaskCancelledError("任务已取消")
-        task.status = TaskStatus.WAITING_REVIEW.value
-        task.progress = 100
+        task = db.get(CheckTask, task_id)
+        _ensure_runnable(db, task, task_id)
+        res = db.execute(
+            update(CheckTask)
+            .where(CheckTask.id == task_id, CheckTask.status.not_in(_TERMINAL_STATUSES))
+            .values(status=TaskStatus.WAITING_REVIEW.value, progress=100)
+        )
         db.commit()
+        if res.rowcount == 0:
+            raise RuntimeError(f"任务 {task_id} 已被外部标记终态，跳过待审核")
     return {}
 
 
@@ -399,6 +415,8 @@ def apply_reviews(state: TaskState) -> dict:
     valid_actions = {ViolationStatus.CONFIRMED.value, ViolationStatus.FALSE_POSITIVE.value}
     task_id = state["task_id"]
     with SessionLocal() as db:
+        task = db.get(CheckTask, task_id)
+        _ensure_runnable(db, task, task_id)
         for r in raw:
             action = r.get("action")
             if action not in valid_actions:
@@ -422,13 +440,26 @@ def finalize(state: TaskState) -> dict:
     有人工确认（CONFIRMED）的异常 → FAILED（验证失败）；全部误报或零异常 → SUCCESS
     （验证通过）。resume 后 apply_reviews 已把本任务 UNCONFIRMED 全量转成
     CONFIRMED/FALSE_POSITIVE，此处按 CONFIRMED 存在与否定终态即可。
+    终态 CAS（T4.3 review P1）：首次运行零 violation 也走本节点（build._should_wait
+    done 分支），是僵尸线程复活终态（超时 FAILED → SUCCESS）的直接路径——条件更新
+    WHERE status NOT IN 终态，外部终态已落库则 rowcount=0，不覆盖超时判错。
     """
+    task_id = state["task_id"]
     with SessionLocal() as db:
-        task = db.get(CheckTask, state["task_id"])
+        task = db.get(CheckTask, task_id)
+        _ensure_runnable(db, task, task_id)
         has_confirmed = db.query(Violation.id).filter_by(
-            task_id=state["task_id"], status=ViolationStatus.CONFIRMED.value
+            task_id=task_id, status=ViolationStatus.CONFIRMED.value
         ).first()
-        task.status = TaskStatus.FAILED.value if has_confirmed else TaskStatus.SUCCESS.value
-        task.progress = 100
+        res = db.execute(
+            update(CheckTask)
+            .where(CheckTask.id == task_id, CheckTask.status.not_in(_TERMINAL_STATUSES))
+            .values(
+                status=TaskStatus.FAILED.value if has_confirmed else TaskStatus.SUCCESS.value,
+                progress=100,
+            )
+        )
         db.commit()
+        if res.rowcount == 0:
+            raise RuntimeError(f"任务 {task_id} 已被外部标记终态，跳过定稿")
     return {}
