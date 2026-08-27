@@ -127,19 +127,26 @@ graph TB
         GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
     end
     subgraph 应用层
-        API["backend (FastAPI :8000)<br/>REST API + LangGraph 流水线<br/>startup 建表/本体加载/恢复任务"]
+        API["backend (FastAPI :8000)<br/>REST API + LangGraph 流水线 + HITL<br/>本体 / SPARQL 校验 / 报告 / 落库<br/>文档解析 · startup 建表/本体加载/恢复任务"]
     end
-    subgraph 数据与外部
-        MYSQL[(MySQL 8<br/>业务表 + checkpoint<br/>+ token_usage)]
-        DS["DeepSeek<br/>LLM 抽取 / 语义校验"]
-        OCR["PaddleOCR<br/>扫描件识别"]
+    subgraph AI 服务（逻辑域 · backend 进程内）
+        EX["LLM 抽取<br/>本体驱动 schema · json_mode · 分段重抽"]
+        SE["语义校验<br/>按段批跑 · 原文证据 · 置信度"]
+        OC["OCR<br/>PaddleOCR 扫描件识别"]
+        DS["DeepSeek<br/>外部 LLM API"]
+    end
+    subgraph 数据层
+        MYSQL[(MySQL 8<br/>业务表 + checkpoint + token_usage)]
     end
 
     FE --> GATEWAY
     GATEWAY --> API
     API --> MYSQL
-    API --> DS
-    API --> OCR
+    API --> EX
+    API --> SE
+    API --> OC
+    EX --> DS
+    SE --> DS
 ```
 
 **对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: cc.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。宿主端口映射的 backend 地址（如 `localhost:8003`）仅供开发调试 / 评测直连，绕过网关。
