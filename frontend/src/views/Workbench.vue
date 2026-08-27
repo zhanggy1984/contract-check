@@ -201,7 +201,9 @@ function startPoll(id) {
     }
     if (['SUCCESS', 'FAILED', 'CANCELLED'].includes(t.status)) {
       stopPoll()
-      if (t.status === 'SUCCESS') loadResult(id)
+      // 终态统一刷新最终 result：FAILED（确认的异常）需同步异常状态为 CONFIRMED，
+      // 否则提交审核后仍显示提交前加载的 UNCONFIRMED 旧数据
+      loadResult(id)
     }
   }, 1500)
 }
