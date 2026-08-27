@@ -95,6 +95,22 @@ class TestPaginationValidation(unittest.TestCase):
         r = self.client.get("/api/rules", params={"page": 0})
         self.assertEqual(r.status_code, 422)
 
+    def test_tasks_size_over_limit_rejected(self):
+        r = self.client.get("/api/tasks", params={"size": 101})
+        self.assertEqual(r.status_code, 422, "size>100 防 DoS 应 422")
+
+    def test_tasks_size_limit_boundary_ok(self):
+        r = self.client.get("/api/tasks", params={"size": 100})
+        self.assertEqual(r.status_code, 200, "size=100 是上限边界，应放行")
+
+    def test_violations_size_over_limit_rejected(self):
+        r = self.client.get("/api/violations", params={"size": 101})
+        self.assertEqual(r.status_code, 422)
+
+    def test_rules_size_over_limit_rejected(self):
+        r = self.client.get("/api/rules", params={"size": 101})
+        self.assertEqual(r.status_code, 422)
+
 
 class TestStatusBodyLength(unittest.TestCase):
     def test_confirm_user_over_50_rejected(self):

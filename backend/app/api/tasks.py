@@ -230,7 +230,7 @@ def _rule_result_to_tool(r: RuleCheckResult, rule_name: str | None = None) -> di
 
 @router.get("")
 def list_tasks(status: str | None = None, file_name: str | None = None,
-               page: int = Query(1, ge=1), size: int = Query(10, ge=0),
+               page: int = Query(1, ge=1), size: int = Query(10, ge=0, le=100),
                db: Session = Depends(get_db)):
     """历史记录：分页 + 状态/文件名筛选。joinedload 防 N+1（t.contract_file 每行懒加载）。"""
     q = db.query(CheckTask).options(joinedload(CheckTask.contract_file))

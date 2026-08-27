@@ -19,7 +19,7 @@ def list_violations(
     rule_type: str | None = None,
     severity: str | None = None,
     page: int = Query(1, ge=1),
-    size: int = Query(20, ge=0),
+    size: int = Query(20, ge=0, le=100),
     db: Session = Depends(get_db),
 ):
     """按任务/状态/规则类型/严重级别筛选，分页。"""

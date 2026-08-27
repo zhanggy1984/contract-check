@@ -14,7 +14,7 @@ router = APIRouter(prefix="/rules", tags=["rules"])
 @router.get("")
 def list_rules(rule_type: str | None = None, source: str | None = None,
                enabled: bool | None = None,
-               page: int = Query(1, ge=1), size: int = Query(20, ge=0),
+               page: int = Query(1, ge=1), size: int = Query(20, ge=0, le=100),
                db: Session = Depends(get_db)):
     return svc.list_rules(db, rule_type, source, enabled, page, size)
 
