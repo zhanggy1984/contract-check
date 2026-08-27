@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app.llm import extractor
 from app.llm.extractor import extract_contract
+from app.llm.llm_client import LLMError
 
 # schema required = [contractTitle, currency, hasParty]，hasParty 允许空数组
 VALID_JSON = '{"contractTitle": "测试合同", "currency": "CNY", "hasParty": []}'
@@ -260,6 +261,27 @@ class TestSplitTextNoLoss(unittest.TestCase):
         # 字符级无丢失：全部字符都保留在 chunks 拼接结果中
         expected_len = len("短段落A") + (SEGMENT_CHAR_LIMIT + 100) + len("短段落B")
         self.assertEqual(sum(len(c) for c in chunks), expected_len)
+
+
+class TestExtractLLMError(unittest.TestCase):
+    """LLM 网络异常兜底：SDK 重试耗尽后干净失败（FAILED 带 error + usage），不再裸抛。"""
+
+    def test_single_segment_llm_error_clean_failed(self):
+        with patch.object(extractor, "call_json", side_effect=LLMError("连接超时")):
+            r = extract_contract(TEXT)
+        self.assertEqual(r.status, "FAILED", "网络失败应落 FAILED 而非裸抛")
+        self.assertIsNone(r.std_json)
+        self.assertIn("LLM 调用失败", r.error or "", "error 应含可审计原因")
+
+    def test_segmented_llm_error_clean_failed(self):
+        from app.llm.extractor import SINGLE_SEGMENT_CHAR_LIMIT
+
+        # 超长文本走分段路径：每段 call_json 均抛 LLMError → 全部分段失败 → 干净 FAILED
+        long_text = "第一条 标的 服务器壹台。\n" * (SINGLE_SEGMENT_CHAR_LIMIT // 12 + 100)
+        with patch.object(extractor, "call_json", side_effect=LLMError("限流")):
+            r = extract_contract(long_text)
+        self.assertEqual(r.status, "FAILED", "分段全失败应落 FAILED 而非裸抛")
+        self.assertEqual(r.error, "全部分段抽取失败")
 
 
 if __name__ == "__main__":

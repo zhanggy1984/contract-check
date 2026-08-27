@@ -6,6 +6,7 @@
 import unittest
 from unittest.mock import patch
 
+from app.llm.llm_client import LLMError
 from app.validation.semantic_evaluator import (
     Judgment,
     JudgmentOutcome,
@@ -220,6 +221,15 @@ class TestEvaluateSegment(unittest.TestCase):
         seg = _seg("合同约定违约责任。")
         with patch("app.validation.semantic_evaluator.call_json",
                    return_value=("", "length", {"total_tokens": 10})):
+            out = self.ev._evaluate_segment(seg, self.rules)
+        self.assertEqual(out["r1"].confidence, "LOW")
+        self.assertIsNone(out["r1"].judgment)
+
+    def test_network_error_degrades_to_low(self):
+        # 网络/超时/限流（LLMError）→ 整段全 LOW，不因单段 LLM 故障炸掉整个任务（异常兜底）
+        seg = _seg("合同约定违约责任。")
+        with patch("app.validation.semantic_evaluator.call_json",
+                   side_effect=LLMError("连接超时")):
             out = self.ev._evaluate_segment(seg, self.rules)
         self.assertEqual(out["r1"].confidence, "LOW")
         self.assertIsNone(out["r1"].judgment)

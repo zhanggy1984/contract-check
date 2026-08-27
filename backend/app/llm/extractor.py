@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError, create_model
 
 from app.common.constants import ExtractionStatus
 from app.llm.injection import guard_text
-from app.llm.llm_client import call_json
+from app.llm.llm_client import LLMError, call_json
 from app.ontology.loader import load_ontology
 from app.ontology.schema_mapper import build_extraction_schema
 from app.parser.text_cleaner import clean_text
@@ -297,7 +297,12 @@ def _single(text: str, model: type[BaseModel], schema: dict[str, Any]) -> Single
     last_data: dict[str, Any] | None = None
     usage_agg: dict[str, int] | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        content, finish_reason, usage = call_json(SYSTEM_PROMPT, _build_prompt(text, schema, feedback))
+        try:
+            content, finish_reason, usage = call_json(SYSTEM_PROMPT, _build_prompt(text, schema, feedback))
+        except LLMError as e:
+            # 网络/超时/限流：SDK 重试已耗尽，不追加抽取级重试（防重复计费）；
+            # 干净失败带 error 落库（上层 obj=None → FAILED），usage 为前序轮次聚合
+            return SingleResult(last_data, False, attempt, error=f"LLM 调用失败: {e}", usage=usage_agg)
         usage_agg = _merge_usage(usage_agg, usage)
         if finish_reason == "length":
             return SingleResult(None, True, attempt, usage=usage_agg)  # 截断 → 分段降级

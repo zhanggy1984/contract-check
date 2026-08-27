@@ -5,6 +5,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api import contracts, files, rules, tasks, violations
@@ -31,6 +32,18 @@ app.include_router(tasks.router, prefix="/api")
 app.include_router(violations.router, prefix="/api")
 app.include_router(rules.router, prefix="/api")
 app.include_router(contracts.router, prefix="/api")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """未捕获异常兜底：防 FastAPI 默认 500 纯文本，统一结构化错误 + trace 日志。
+
+    仅记录不向客户端泄露内部信息；HTTPException（files.py 的 400 等）走各自 handler，
+    {"detail": ...} 格式不受影响。
+    """
+    logger.error("未捕获异常 %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(status_code=500,
+                        content={"error": {"code": "INTERNAL_ERROR", "message": "服务器内部错误"}})
 
 
 @app.middleware("http")

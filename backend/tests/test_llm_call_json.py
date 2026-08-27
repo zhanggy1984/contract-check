@@ -7,8 +7,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openai import LengthFinishReasonError
+from openai import LengthFinishReasonError, OpenAIError
 
+from app.config import settings
 from app.llm import llm_client
 
 
@@ -105,6 +106,24 @@ class TestCallJson(unittest.TestCase):
         self._patch_invoke(lambda _msg: resp)
         _, _, out = llm_client.call_json("sys", "user")
         self.assertEqual(out, {"total_tokens": 3})
+
+    # ---- OpenAIError 网络异常 → LLMError 包装（异常兜底）----
+
+    def test_openai_error_wrapped_as_llm_error(self):
+        def _boom(_msg):
+            raise OpenAIError("网络连接失败")
+
+        self._patch_invoke(_boom)
+        with self.assertRaises(llm_client.LLMError) as ctx:
+            llm_client.call_json("sys", "user")
+        self.assertIn("LLM 调用失败", str(ctx.exception))
+
+    def test_get_chat_model_uses_settings_timeout_retries(self):
+        # 超时/重试从 settings 读取，不再硬编码
+        with patch("app.llm.llm_client.ChatOpenAI") as m:
+            llm_client.get_chat_model()
+        self.assertEqual(m.call_args.kwargs["timeout"], settings.llm_timeout)
+        self.assertEqual(m.call_args.kwargs["max_retries"], settings.llm_max_retries)
 
 
 if __name__ == "__main__":

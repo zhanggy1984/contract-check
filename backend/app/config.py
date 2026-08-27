@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    llm_timeout: int = 120          # LLM 抽取/语义调用超时（秒），与现状硬编码一致
+    llm_max_retries: int = 3        # openai SDK 内置 429/5xx 指数退避重试次数
 
     # MySQL（本机 docker compose）
     mysql_host: str = "localhost"

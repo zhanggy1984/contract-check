@@ -9,11 +9,15 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from openai import LengthFinishReasonError
+from openai import LengthFinishReasonError, OpenAIError
 
 from app.config import settings
 
 MAX_TOKENS = 8192
+
+
+class LLMError(RuntimeError):
+    """LLM 调用失败（网络/超时/限流/服务端错误，SDK 重试耗尽）。调用方应降级而非裸抛。"""
 
 
 def get_chat_model() -> ChatOpenAI:
@@ -24,8 +28,8 @@ def get_chat_model() -> ChatOpenAI:
         base_url=settings.deepseek_base_url,
         max_tokens=MAX_TOKENS,
         temperature=0.1,
-        max_retries=3,                 # 429/5xx 指数退避（openai 客户端内置）
-        timeout=120,
+        max_retries=settings.llm_max_retries,  # 429/5xx 指数退避（openai 客户端内置）
+        timeout=settings.llm_timeout,
         model_kwargs={"response_format": {"type": "json_object"}},
     )
 
@@ -50,6 +54,10 @@ def call_json(system: str, user: str) -> tuple[str | None, str, dict[str, Any] |
         finish_reason = str(comp.choices[0].finish_reason or "length") if comp.choices else "length"
         usage = comp.usage.model_dump() if comp.usage else None
         return (content if isinstance(content, str) else None, finish_reason, usage)
+    except OpenAIError as e:
+        # 网络/超时/限流/服务端错误：SDK 已按 max_retries 重试耗尽，此处包装为 LLMError
+        # 交调用方（extractor/semantic_evaluator）降级，避免裸抛导致任务 FAILED 且无审计信息
+        raise LLMError(f"LLM 调用失败: {e}") from e
     content = resp.content
     if isinstance(content, list):  # 个别情况 content 为块列表，取文本
         content = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))

@@ -9,6 +9,7 @@
   都 FAIL 才 FAIL；全部段 applicable=false → SKIPPED；其余 PASS
 """
 import json
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -17,7 +18,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.common.constants import RuleResult
 from app.llm.injection import guard_text
-from app.llm.llm_client import call_json
+from app.llm.llm_client import LLMError, call_json
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     # 五维度法（角色-任务-输入-约束-输出）XML 标签化，同 extractor.SYSTEM_PROMPT。
@@ -161,7 +164,13 @@ class SemanticEvaluator:
                        if r["rule_iri"] in last and last[r["rule_iri"]].confidence != "HIGH"]
                 if bad:
                     feedback = f"以下规则的 evidence 必须是合同原文的精确子串（逐字引用）：{', '.join(bad)}"
-            content, finish_reason, usage = call_json(SYSTEM_PROMPT, _build_prompt(segment, rules, feedback))
+            try:
+                content, finish_reason, usage = call_json(SYSTEM_PROMPT, _build_prompt(segment, rules, feedback))
+            except LLMError as e:
+                # 网络/超时/限流：语义评估尽力而为，降级本段全 LOW（评估失败标注，_aggregate 区分
+                # "规则不适用 SKIPPED/HIGH"与"评估失败 SKIPPED/LOW"），不因单段 LLM 故障炸掉整个任务
+                logger.warning("语义判定 LLM 调用失败 段 %s: %s", idx, e)
+                return {r["rule_iri"]: JudgmentOutcome(r["rule_iri"], None, "LOW", idx) for r in rules}
             self._add_cost(usage)
             if finish_reason == "length":
                 # 输出被截断：尽量抢救已输出的部分判定（标 LOW 供参考）；无可用内容则重试一次
