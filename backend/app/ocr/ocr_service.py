@@ -15,6 +15,7 @@ import pymupdf
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.6  # 低于该置信度的识别行丢弃
+_LOW_CONF = 0.8  # 已识别行低于该置信度计"低质量"（低置信行占比统计用）
 
 _ocr = None
 _lock = threading.Lock()
@@ -45,7 +46,17 @@ class OcrService:
 
     @classmethod
     def ocr_pdf(cls, pdf_path: str, pages: list[int] | None = None) -> dict[int, str]:
-        """扫描 PDF 页 → OCR 文本，返回 {页索引: 文本}。
+        """扫描 PDF 页 → OCR 文本，返回 {页索引: 文本}（质量统计见 ocr_pdf_with_stats）。"""
+        results, _ = cls.ocr_pdf_with_stats(pdf_path, pages=pages)
+        return results
+
+    @classmethod
+    def ocr_pdf_with_stats(cls, pdf_path: str, pages: list[int] | None = None) -> tuple[dict[int, str], dict]:
+        """扫描 PDF 页 → OCR 文本 + 识别质量指标（T4.3-9）。
+
+        统计供观测/标记低质量扫描件：coverage=成功识别页/应识别页，avg_confidence=阈值以上
+        行平均置信度，low_conf_line_ratio=低置信度(<0.8)行占比——低质量扫描件这两项显著走低，
+        可用于日志告警或后续质量标记（本期仅统计+日志，不落库）。
 
         pages=None 时全部页；指定 pages 时只识别这些页（混合扫描 PDF 仅 OCR 空页）。
         逐页隔离：单页渲染/识别失败不中止整篇（该页缺席，调用方感知缺页）；
@@ -59,6 +70,10 @@ class OcrService:
         indices = list(range(len(doc))) if pages is None else sorted(set(pages))
         results: dict[int, str] = {}
         failures = 0
+        scores: list[float] = []
+        low_conf = 0
+        lines_total = 0
+        chars_total = 0
         try:
             for i in indices:
                 try:
@@ -70,10 +85,16 @@ class OcrService:
                         img = img[:, :, :3]
                     page_lines: list[str] = []
                     for text, score in cls._run(model, img):
-                        if float(score) >= CONFIDENCE_THRESHOLD:
+                        s = float(score)
+                        if s >= CONFIDENCE_THRESHOLD:
                             t = str(text).strip()
                             if t:
                                 page_lines.append(t)
+                                lines_total += 1
+                                chars_total += len(t)
+                                scores.append(s)
+                                if s < _LOW_CONF:
+                                    low_conf += 1
                     if page_lines:
                         results[i] = "\n".join(page_lines)
                 except Exception as e:  # noqa: BLE001 单页失败不中止整篇
@@ -83,7 +104,23 @@ class OcrService:
             doc.close()
         if indices and failures == len(indices):
             raise RuntimeError(f"OCR 全部失败（{failures}/{len(indices)} 页）")
-        return results
+        pages_total = len(indices)
+        pages_ok = len(results)
+        stats = {
+            "pages_total": pages_total,
+            "pages_ok": pages_ok,
+            "coverage": (pages_ok / pages_total) if pages_total else 0.0,
+            "lines_total": lines_total,
+            "chars_total": chars_total,
+            "avg_confidence": (sum(scores) / len(scores)) if scores else 0.0,
+            "low_conf_line_ratio": (low_conf / lines_total) if lines_total else 0.0,
+        }
+        logger.info("OCR 质量统计: 覆盖 %d/%d 页(%.0f%%), %d 行 %d 字符, "
+                    "平均置信度 %.2f, 低置信行占比 %.0f%%",
+                    pages_ok, pages_total, stats["coverage"] * 100,
+                    lines_total, chars_total, stats["avg_confidence"],
+                    stats["low_conf_line_ratio"] * 100)
+        return results, stats
 
     @staticmethod
     def _run(model, img) -> list[tuple[str, float]]:

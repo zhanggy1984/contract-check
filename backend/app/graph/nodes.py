@@ -147,10 +147,12 @@ def parse_node(state: TaskState) -> dict:
         )
         _persist_decisions(state["task_id"], [ocr_trace])
         if need_ocr:
-            ocr_map = registry.execute("ocr_pdf", pdf_path=storage_path, pages=scanned)["pages"]
+            out = registry.execute("ocr_pdf", pdf_path=storage_path, pages=scanned)
+            ocr_map = out["pages"]
             for idx, t in ocr_map.items():
                 page_texts[idx] = t
             text = "\n".join(page_texts)
+            logger.info("任务 %s OCR 质量(页级): %s", state["task_id"], out.get("stats"))
     else:
         # 历史任务回退：无页级数据，沿用 has_scanned + 全文 OCR
         need_ocr, ocr_trace = decide_ocr_required(
@@ -159,9 +161,11 @@ def parse_node(state: TaskState) -> dict:
         )
         _persist_decisions(state["task_id"], [ocr_trace])
         if need_ocr:
-            # 全文 OCR：exec_ocr_pdf 返回 {页索引: 文本}，按页序合并（页索引有序）
-            ocr_map = registry.execute("ocr_pdf", pdf_path=storage_path)["pages"]
+            # 全文 OCR：exec_ocr_pdf 返回 {页索引: 文本, stats}，按页序合并（页索引有序）
+            out = registry.execute("ocr_pdf", pdf_path=storage_path)
+            ocr_map = out["pages"]
             text = "\n".join(ocr_map.values())
+            logger.info("任务 %s OCR 质量(全文): %s", state["task_id"], out.get("stats"))
     if need_ocr:
         txt.write_text(text, encoding="utf-8")
         with SessionLocal() as db:

@@ -36,9 +36,14 @@ def exec_evaluate_semantic(segments: list, rules: list) -> dict:
 
 
 def exec_ocr_pdf(pdf_path: str, pages: list[int] | None = None) -> dict:
-    """扫描 PDF 页 OCR → {页索引: 清洗文本}。PaddleOCR 未安装/全部页失败时抛 RuntimeError。"""
+    """扫描 PDF 页 OCR → {页索引: 清洗文本, stats: 识别质量指标}。
+
+    stats（T4.3-9）供日志观测；nodes 只消费 ["pages"]，加字段不破坏既有调用。
+    PaddleOCR 未安装/全部页失败时抛 RuntimeError。
+    """
     # OCR 文本噪声更大（全角/零宽/多余空白），统一过输入清洗，与文本层提取一致
-    return {"pages": {i: clean_text(t) for i, t in OcrService.ocr_pdf(pdf_path, pages=pages).items()}}
+    results, stats = OcrService.ocr_pdf_with_stats(pdf_path, pages=pages)
+    return {"pages": {i: clean_text(t) for i, t in results.items()}, "stats": stats}
 
 
 def exec_run_sparql(graph, rule) -> dict:
