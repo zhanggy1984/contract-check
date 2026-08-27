@@ -1,7 +1,7 @@
 """规则管理接口（T2.5）：列表/创建/编辑/失效 + dry-run。"""
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,8 @@ router = APIRouter(prefix="/rules", tags=["rules"])
 
 @router.get("")
 def list_rules(rule_type: str | None = None, source: str | None = None,
-               enabled: bool | None = None, page: int = 1, size: int = 20,
+               enabled: bool | None = None,
+               page: int = Query(1, ge=1), size: int = Query(20, ge=0),
                db: Session = Depends(get_db)):
     return svc.list_rules(db, rule_type, source, enabled, page, size)
 

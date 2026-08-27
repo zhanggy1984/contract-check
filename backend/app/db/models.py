@@ -36,7 +36,7 @@ class OntologyVersion(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     version: Mapped[str] = mapped_column(String(50), nullable=False)
-    md5: Mapped[str] = mapped_column(String(32), nullable=False)
+    md5: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)  # 并发首插防重复版本
     loaded_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -57,6 +57,9 @@ class CheckTask(Base):
     segments_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)
     extraction_conflicts: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)  # 分段抽取字段冲突 JSON 数组（A5）
     token_usage_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)      # 评测契约 usage 聚合（抽取+语义，B.4）
+    extraction_usage_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)  # 抽取 LLM usage 快照（崩溃重放复用，防重复计费）
+    sem_outcomes_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)      # 语义评估结果快照（崩溃重放复用，防重复计费）
+    sem_usage_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)         # 语义 LLM usage 快照（崩溃重放复用）
     decision_json: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)         # 决策痕迹列表（LLM+短路+兜底，契约隔离，不入 tool_calls/usage）
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     update_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

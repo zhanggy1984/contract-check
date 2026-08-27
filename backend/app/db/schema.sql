@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS ontology_version (
   file_path VARCHAR(500) NOT NULL,
   version VARCHAR(50) NOT NULL,
   md5 CHAR(32) NOT NULL,
-  loaded_time DATETIME DEFAULT CURRENT_TIMESTAMP
+  loaded_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_ontology_version_md5 (md5)   -- 并发首插防重复版本（T4.3-6）
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS check_task (
@@ -37,6 +38,9 @@ CREATE TABLE IF NOT EXISTS check_task (
   segments_json LONGTEXT,
   extraction_conflicts LONGTEXT,       -- 分段抽取跨段字段冲突 JSON 数组
   token_usage_json LONGTEXT,           -- 评测契约 usage 聚合（抽取+语义 LLM token，B.4）
+  extraction_usage_json LONGTEXT,      -- 抽取 LLM usage 快照（崩溃重放复用，防重复计费）
+  sem_outcomes_json LONGTEXT,          -- 语义评估结果快照（崩溃重放复用，防重复计费）
+  sem_usage_json LONGTEXT,             -- 语义 LLM usage 快照（崩溃重放复用）
   decision_json LONGTEXT,              -- 决策痕迹列表（function calling 决策引擎，契约隔离）
   create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

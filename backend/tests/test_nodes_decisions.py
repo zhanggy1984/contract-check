@@ -44,13 +44,16 @@ class FakeTask:
     status = "PENDING"
     progress = 0
     ontology_version_id = 1
-    extraction_status = "COMPLETE"
+    extraction_status = None  # 崩溃重放守卫：非 COMPLETE/INCOMPLETE 才走正常抽取路径
     extraction_rdf = None
     segments_json = json.dumps([{"index": 0, "title": "段", "content": "正文内容"}])
     decision_json = None
     standard_json = None
     extraction_conflicts = None
     extraction_rdf_attr = None
+    extraction_usage_json = None
+    sem_outcomes_json = None
+    sem_usage_json = None
     llm_model = None
     contract_file = None
 

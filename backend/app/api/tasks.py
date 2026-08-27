@@ -4,7 +4,7 @@ import json
 import re
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
@@ -230,7 +230,8 @@ def _rule_result_to_tool(r: RuleCheckResult, rule_name: str | None = None) -> di
 
 @router.get("")
 def list_tasks(status: str | None = None, file_name: str | None = None,
-               page: int = 1, size: int = 10, db: Session = Depends(get_db)):
+               page: int = Query(1, ge=1), size: int = Query(10, ge=0),
+               db: Session = Depends(get_db)):
     """历史记录：分页 + 状态/文件名筛选。joinedload 防 N+1（t.contract_file 每行懒加载）。"""
     q = db.query(CheckTask).options(joinedload(CheckTask.contract_file))
     if status:

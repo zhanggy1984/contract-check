@@ -10,6 +10,7 @@ from pathlib import Path
 
 import owlready2 as owl
 import rdflib
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import OntologyVersion
 from app.db.session import SessionLocal
@@ -22,6 +23,7 @@ ONTOLOGY_VERSION = "1.0"
 
 _lock = threading.Lock()
 _cache: dict[str, owl.Ontology] = {}
+_version_lock = threading.Lock()   # register_version 进程内串行化（防 md5 并发首插，兜底不依赖唯一索引）
 
 
 def md5_of_file(path: Path) -> str:
@@ -44,10 +46,22 @@ def load_ontology(path: Path | None = None) -> owl.Ontology:
 
 
 def register_version(db, path: Path | None = None, version: str | None = None) -> int:
-    """本体版本落库（按 md5 幂等复用），返回 ontology_version_id。"""
+    """本体版本落库（按 md5 幂等复用），返回 ontology_version_id。
+
+    并发首插竞态（T4.3-6）：进程内锁串行化（单实例并发直接消灭窗口，兜底不依赖唯一索引
+    是否存在）+ md5 唯一约束 + begin_nested（savepoint）捕获 IntegrityError 回退复用
+    （多实例防线）。必须用 savepoint 而非 rollback——register_version 内部 commit，
+    直接 rollback 会误伤调用方（extract_node）同 session 未提交的 task 改动。
+    """
     path = Path(path) if path else ONTOLOGY_PATH
     version = version or ONTOLOGY_VERSION
     md5 = md5_of_file(path)
+    with _version_lock:
+        return _register_locked(db, path, version, md5)
+
+
+def _register_locked(db, path: Path, version: str, md5: str) -> int:
+    """持锁执行版本注册：查复用 → 首插（begin_nested 撞键回退）。"""
     existing = db.query(OntologyVersion).filter(OntologyVersion.md5 == md5).first()
     if existing:
         return existing.id
@@ -58,6 +72,17 @@ def register_version(db, path: Path | None = None, version: str | None = None) -
         md5=md5,
     )
     db.add(row)
+    try:
+        with db.begin_nested():
+            db.flush()          # 撞唯一键（并发首插）在此抛 IntegrityError
+    except IntegrityError:
+        # 另一线程已插入同 md5 版本：savepoint 已回滚，移除 pending 行防重复 flush，
+        # 回退复用已有版本（不破坏外层 session 的 pending 改动）
+        db.expunge(row)
+        existing = db.query(OntologyVersion).filter(OntologyVersion.md5 == md5).first()
+        if existing is not None:
+            return existing.id
+        raise
     db.commit()
     db.refresh(row)
     return row.id

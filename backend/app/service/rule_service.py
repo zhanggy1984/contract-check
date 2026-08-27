@@ -6,6 +6,10 @@
 - 人工规则仅 DETERMINISTIC/SEMANTIC 可建；本体生成规则只读（仅启停/severity）。
 """
 import json
+import logging
+import threading
+
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.common.constants import RuleResult, RuleSource, RuleType
 from app.db.models import CheckRule, CheckTask, RuleCheckResult, Violation
@@ -14,11 +18,56 @@ from app.ontology.rule_generator import generate_rules, load_manual_rules
 from app.validation.semantic_evaluator import SemanticEvaluator
 from app.validation.sparql_executor import SparqlExecutor, build_graph
 
+logger = logging.getLogger(__name__)
+
+# sync_rules 记忆化（T4.3-6）：同版本只同步一次，版本变化才重同步（顺带收敛并发窗口）
+_sync_lock = threading.Lock()
+_synced_ids: dict[int, dict[str, int]] = {}
+_SYNC_RETRY_MAX = 2  # 死锁重试上限（1213/40001）
+
+
+def _is_deadlock(e: OperationalError) -> bool:
+    """1213 死锁 / 40001 序列化失败（与 nodes.persist 同款判据）。"""
+    args = getattr(e.orig, "args", ()) if e.orig is not None else ()
+    return bool(args) and args[0] in (1213, 40001)
+
 
 def sync_rules(db, ontology_version_id: int) -> dict[str, int]:
-    """生成并同步全部规则，返回 {rule_iri: rule_id}。"""
+    """生成并同步全部规则，返回 {rule_iri: rule_id}。
+
+    记忆化（T4.3-6）：同版本只同步一次，版本变化才重同步——顺带把并发窗口收敛到
+    「版本首次引入」一瞬。并发首插兜底：begin_nested 捕获唯一键冲突回退复用；
+    死锁（1213/40001）顶层重试。消费方是 get_enabled_rules（实时读 DB），
+    人工规则增删/启停不受缓存影响；返回值仅历史/测试契约，任务流程不消费。
+
+    契约：
+    - 运行中修改 rules/manual/*.rq 需重启或版本变更才生效（同版本缓存不重读文件）
+    - 调用方进入前须 commit 自己的 pending 改动——死锁时 InnoDB 回滚整个事务，
+      db.rollback() 会一并回滚 session 未提交内容（validate_deterministic 已先 commit，安全）
+    """
+    with _sync_lock:
+        cached = _synced_ids.get(ontology_version_id)
+        if cached is not None:
+            return cached
     onto = load_ontology()
     rules = generate_rules(onto) + load_manual_rules()
+    for attempt in range(1, _SYNC_RETRY_MAX + 1):
+        try:
+            ids = _sync_once(db, ontology_version_id, rules)
+            break
+        except OperationalError as e:
+            if _is_deadlock(e) and attempt < _SYNC_RETRY_MAX:
+                db.rollback()   # 死锁已回滚整个事务，重置 session 状态重试
+                logger.warning("sync_rules 死锁重试 %d/%d", attempt, _SYNC_RETRY_MAX)
+                continue
+            raise
+    with _sync_lock:
+        _synced_ids[ontology_version_id] = ids
+    return ids
+
+
+def _sync_once(db, ontology_version_id: int, rules: list[dict]) -> dict[str, int]:
+    """单轮规则 upsert：返回 {rule_iri: rule_id}（同版本并发时靠唯一键兜底）。"""
     ids: dict[str, int] = {}
     for r in rules:
         ovid = ontology_version_id if r["source"] == RuleSource.ONTOLOGY_GENERATED.value else None
@@ -33,6 +82,16 @@ def sync_rules(db, ontology_version_id: int) -> dict[str, int]:
                 ontology_version_id=ovid,
             )
             db.add(row)
+            try:
+                with db.begin_nested():
+                    db.flush()   # 撞 uk_rule_iri_version（并发首插）在此抛 IntegrityError
+            except IntegrityError:
+                # 并发首插竞态：另一线程已插入同 (rule_iri, version)，回退复用
+                db.expunge(row)
+                row = db.query(CheckRule).filter_by(
+                    rule_iri=r["rule_iri"], ontology_version_id=ovid).first()
+                if row is None:
+                    raise
         else:
             # 表达式/严重级别随本体变化刷新；不触碰 enabled
             row.rule_name = r["rule_name"]
@@ -43,7 +102,7 @@ def sync_rules(db, ontology_version_id: int) -> dict[str, int]:
             row.description = r["description"]
             row.concept_iri = r.get("concept_iri")
             row.property_iri = r.get("property_iri")
-        db.flush()
+        db.flush()   # 保证 ids 读到真实 id（非 pending）
         ids[r["rule_iri"]] = row.id
     db.commit()
     return ids

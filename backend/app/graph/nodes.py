@@ -173,6 +173,23 @@ def parse_node(state: TaskState) -> dict:
     return {"parsed_text": text}
 
 
+def _reuse_extraction(task) -> dict:
+    """崩溃重放复用已落库抽取结果（T4.3-5 防重复计费）：读回快照字段直接返回 state。
+
+    复用前提：extract_node 先落库后返回，崩溃在「落库后→checkpoint 前」窗口 →
+    recover 重放本节点若重新执行 registry.execute 会重复计费。已落库（COMPLETE/INCOMPLETE）
+    即视为抽取已完成，跳过 LLM 与 register_version；usage 从 extraction_usage_json 单次快照读
+    （token_usage_json 是 persist 写的聚合值，不可当单次用量复用，否则二次聚合会翻倍）。
+    """
+    return {
+        "extraction_json": json.loads(task.standard_json) if task.standard_json else None,
+        "extraction_status": task.extraction_status,
+        "extraction_rdf": task.extraction_rdf or "",
+        "segments": json.loads(task.segments_json) if task.segments_json else [],
+        "extraction_usage": json.loads(task.extraction_usage_json) if task.extraction_usage_json else None,
+    }
+
+
 def extract_node(state: TaskState) -> dict:
     """LLM 抽取 + RDF 转换 + segments 恒落库（T1.4/T1.5）。
 
@@ -182,6 +199,13 @@ def extract_node(state: TaskState) -> dict:
     with SessionLocal() as db:
         task = db.get(CheckTask, task_id)
         _ensure_runnable(db, task, task_id)
+        # 崩溃重放守卫（T4.3-5 重复计费）：extract_node 先落库后返回，崩溃在
+        # 「落库后→checkpoint 前」窗口 → recover 重放本节点会重调 LLM。已落库
+        # （COMPLETE/INCOMPLETE）直接复用快照跳过 registry.execute 与 register_version；
+        # FAILED 不落库不触发（失败重试仍走 LLM，属合理重试非重复计费）
+        if task.extraction_status in (ExtractionStatus.COMPLETE.value,
+                                      ExtractionStatus.INCOMPLETE.value):
+            return _reuse_extraction(task)
         task.status = TaskStatus.EXTRACTING.value
         task.progress = 40
         task.llm_model = settings.deepseek_model
@@ -216,6 +240,7 @@ def extract_node(state: TaskState) -> dict:
         task.segments_json = json.dumps(segments, ensure_ascii=False)
         task.extraction_rdf = rdf_nt or None
         task.extraction_conflicts = json.dumps(result["conflicts"], ensure_ascii=False) if result["conflicts"] else None
+        task.extraction_usage_json = json.dumps(result["token_usage"], ensure_ascii=False) if result["token_usage"] else None  # 崩溃重放复用快照
         task.progress = 60
         db.commit()
 
@@ -301,6 +326,13 @@ def validate_semantic(state: TaskState) -> dict:
         rules = [r for r in get_enabled_rules(db, ovid)
                  if r.rule_type == RuleType.SEMANTIC.value]
         segments = json.loads(task.segments_json) if task.segments_json else []
+        # 崩溃重放守卫（T4.3-5 重复计费）：语义结果快照已落库 → 复用跳过 evaluate_semantic。
+        # 无规则/无段分支不落库不触发；降级审计第一次运行已写，复用不重复（审计少一条可接受）
+        if task.sem_outcomes_json:
+            return {
+                "sem_outcomes": json.loads(task.sem_outcomes_json),
+                "sem_usage": json.loads(task.sem_usage_json) if task.sem_usage_json else None,
+            }
 
     if not rules:
         return {"sem_outcomes": [], "sem_usage": None}
@@ -320,6 +352,13 @@ def validate_semantic(state: TaskState) -> dict:
         )
         outcomes = res["outcomes"]
         usage = res["usage"]
+        # 崩溃重放快照（T4.3-5）：结果落库供入口复用（防重复计费）。独立事务先于节点返回，
+        # 崩溃在「快照后→checkpoint 前」窗口重放时直接复用；persist 仍从 state 统一写库
+        with SessionLocal() as db:
+            task = db.get(CheckTask, task_id)
+            task.sem_outcomes_json = json.dumps(outcomes, ensure_ascii=False)
+            task.sem_usage_json = json.dumps(usage, ensure_ascii=False) if usage else None
+            db.commit()
     if _is_sem_degraded(outcomes):
         # 语义评估整体降级（LLM 不可用/段原文缺失）→ 留决策审计 + 日志；终态仍按无 violation 走
         # SUCCESS（SKIPPED 非 violation，强行 FAILED 会误报），靠 trace/日志区分"没评估"与"真通过"

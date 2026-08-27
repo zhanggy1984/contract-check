@@ -1,8 +1,8 @@
 """异常（violation）接口：查询列表 + 人工确认/误报状态更新。"""
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.common.constants import ViolationStatus
@@ -18,8 +18,8 @@ def list_violations(
     status: str | None = None,
     rule_type: str | None = None,
     severity: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=0),
     db: Session = Depends(get_db),
 ):
     """按任务/状态/规则类型/严重级别筛选，分页。"""
@@ -44,7 +44,7 @@ def list_violations(
 
 class StatusBody(BaseModel):
     status: str                 # CONFIRMED / FALSE_POSITIVE
-    confirm_user: str | None = None
+    confirm_user: str | None = Field(None, max_length=50)   # 对齐 DB VARCHAR(50)，超长 422 防 DataError
 
 
 @router.patch("/{violation_id}/status")

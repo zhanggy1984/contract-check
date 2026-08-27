@@ -89,12 +89,43 @@ def _ensure_column(engine, table: str, column: str, ddl_type: str) -> None:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
 
 
+def _ensure_unique_index(engine, table: str, column: str) -> None:
+    """幂等补唯一索引（T4.3-6 并发竞态兜底，如 ontology_version.md5）。
+
+    create_all 不给已存在的表加约束；存量已有重复值时建索引会失败，
+    先查唯一索引是否存在、数据是否唯一：重复则跳过并告警（需人工清理后再建），
+    避免启动即崩——评测重建库走 schema.sql 无此问题。
+    """
+    with engine.begin() as conn:
+        exists = conn.execute(text(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = :t "
+            "AND column_name = :c AND non_unique = 0"
+        ), {"t": table, "c": column}).scalar()
+        if exists:
+            return
+        dups = conn.execute(text(
+            f"SELECT COUNT(*) FROM (SELECT {column} FROM {table} "
+            f"GROUP BY {column} HAVING COUNT(*) > 1) d"
+        )).scalar()
+        if dups:
+            logger.warning("表 %s 列 %s 存在 %s 组重复值，跳过建唯一索引（需人工清理）",
+                           table, column, dups)
+            return
+        conn.execute(text(
+            f"ALTER TABLE {table} ADD UNIQUE KEY uk_{table}_{column} ({column})"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     models.Base.metadata.create_all(bind=engine)
     _ensure_column(engine, "check_task", "token_usage_json", "LONGTEXT")
     _ensure_column(engine, "check_task", "decision_json", "LONGTEXT")
+    _ensure_column(engine, "check_task", "extraction_usage_json", "LONGTEXT")
+    _ensure_column(engine, "check_task", "sem_outcomes_json", "LONGTEXT")
+    _ensure_column(engine, "check_task", "sem_usage_json", "LONGTEXT")
     _ensure_column(engine, "contract_file", "page_texts_json", "LONGTEXT")
+    _ensure_unique_index(engine, "ontology_version", "md5")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
     svc.cleanup_terminal_checkpoints()  # 启动兜底：清理终态任务 checkpoint（T4.3-2）
     files.cleanup_orphan_files()        # 启动兜底：清理孤儿文件（T4.3-3）
