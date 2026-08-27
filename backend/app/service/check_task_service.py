@@ -254,9 +254,15 @@ def delete_task(task_id: int) -> tuple[bool, str]:
 
 
 def recover_pending() -> None:
-    """启动时恢复未完成任务（PENDING/PARSING/EXTRACTING/VALIDATING）。"""
+    """启动时恢复未完成任务。
+
+    - PENDING/PARSING/EXTRACTING/VALIDATING → 重新跑图（进程崩溃时节点执行中断）
+    - REVIEWING → 回退 WAITING_REVIEW（resume 崩溃自愈：resume 同步短跑，进程崩溃
+      except 抓不到 → status 永久停 REVIEWING 无自愈路径；崩溃必重启，重启即回退，
+      用户可重新提交审核。CAS WHERE status=REVIEWING 防多实例并发恢复误伤活线程）
+    """
     with SessionLocal() as db:
-        ids = [
+        resume_ids = [
             t.id for t in db.query(CheckTask).filter(
                 CheckTask.status.in_([
                     TaskStatus.PENDING.value,
@@ -266,5 +272,11 @@ def recover_pending() -> None:
                 ])
             ).all()
         ]
-    for tid in ids:
+        db.execute(
+            update(CheckTask)
+            .where(CheckTask.status == TaskStatus.REVIEWING.value)
+            .values(status=TaskStatus.WAITING_REVIEW.value)
+        )
+        db.commit()
+    for tid in resume_ids:
         run_task_async(tid)

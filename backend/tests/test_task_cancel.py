@@ -11,6 +11,8 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
+import sqlalchemy.dialects.mysql as my
+
 import app.service.check_task_service as svc
 from app.common.errors import TaskCancelledError
 from app.config import settings
@@ -67,6 +69,74 @@ class TestCancelTask(unittest.TestCase):
              patch.object(svc, "_cleanup_if_terminal"):
             ok = svc.cancel_task(1)
         self.assertFalse(ok)
+
+
+class _FakeRecoverSession:
+    """支持 recover_pending 的 query().filter().all() + execute/commit 调用链。"""
+
+    def __init__(self, runnable_ids, rowcount=1):
+        self.runnable_ids = runnable_ids
+        self.rowcount = rowcount
+        self.executed = None
+        self.last_result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def query(self, model):
+        return self
+
+    def filter(self, *a, **k):
+        return self
+
+    def all(self):
+        return [type("_T", (), {"id": i})() for i in self.runnable_ids]
+
+    def execute(self, stmt, *a, **k):
+        self.executed = stmt
+        self.last_result = _FakeResult(self.rowcount)
+        return self.last_result
+
+    def commit(self):
+        pass
+
+
+class TestRecoverPending(unittest.TestCase):
+    """启动恢复自愈：REVIEWING（resume 崩溃残留）回退 WAITING_REVIEW，PENDING 等照常重跑。"""
+
+    def _run(self, runnable_ids, rowcount=1):
+        captured = []
+        sess = _FakeRecoverSession(runnable_ids, rowcount)
+        with patch.object(svc, "SessionLocal", return_value=sess), \
+             patch.object(svc, "run_task_async",
+                          side_effect=lambda tid: captured.append(tid)):
+            svc.recover_pending()
+        return sess, captured
+
+    def test_reviewing_rolls_back_to_waiting(self):
+        # DB 有 PENDING(1) 与 REVIEWING(2)：REVIEWING 走回退 UPDATE，PENDING 照常重跑
+        sess, captured = self._run(runnable_ids=[1])
+        self.assertIsNotNone(sess.executed, "必须发出 REVIEWING→WAITING_REVIEW 回退 UPDATE")
+        sql = str(sess.executed.compile(dialect=my.dialect(),
+                                        compile_kwargs={"literal_binds": True}))
+        self.assertIn("REVIEWING", sql, "回退条件限定 REVIEWING（CAS，不误伤活线程）")
+        self.assertIn("WAITING_REVIEW", sql, "回退目标为 WAITING_REVIEW")
+        self.assertEqual(captured, [1], "仅 PENDING/PARSING/EXTRACTING/VALIDATING 重跑")
+
+    def test_no_pending_still_emits_rollback(self):
+        # 无待重跑任务时：回退 UPDATE 仍执行（rowcount 可能 0，无害），不调 run_task_async
+        sess, captured = self._run(runnable_ids=[])
+        self.assertIsNotNone(sess.executed)
+        self.assertEqual(captured, [])
+
+    def test_rowcount_zero_rollback_is_harmless(self):
+        # 无 REVIEWING 任务（UPDATE rowcount=0）时不报错，PENDING 照常重跑
+        sess, captured = self._run(runnable_ids=[7], rowcount=0)
+        self.assertEqual(sess.last_result.rowcount, 0)
+        self.assertEqual(captured, [7])
 
 
 class TestCancelledShortCircuit(unittest.TestCase):
