@@ -129,7 +129,7 @@ graph TB
     subgraph 应用层
         API["backend (FastAPI :8000)<br/>REST API + LangGraph 流水线 + HITL<br/>本体 / SPARQL 校验 / 报告 / 落库<br/>文档解析 · startup 建表/本体加载/恢复任务"]
     end
-    subgraph AI 服务（逻辑域 · backend 进程内）
+    subgraph "AI 服务（逻辑域 · backend 进程内）"
         EX["LLM 抽取<br/>本体驱动 schema · json_mode · 分段重抽"]
         SE["语义校验<br/>按段批跑 · 原文证据 · 置信度"]
         OC["OCR<br/>PaddleOCR 扫描件识别"]
