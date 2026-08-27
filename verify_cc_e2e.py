@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
@@ -23,7 +24,7 @@ import httpx
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows GBK 控制台编不了 ✓
 
-BASE = "http://localhost:8001/api"
+BASE = os.environ.get("CC_BASE", "http://localhost:8001")
 CONTRACT = sys.argv[1] if len(sys.argv) > 1 else "data/test-contracts/b1_missing_date.pdf"
 
 _passed: list[str] = []
@@ -42,7 +43,7 @@ def _check(name: str, ok: bool, detail: str = "") -> None:
 def _upload(client: httpx.Client, path: str) -> int:
     fname = path.rsplit("/", 1)[-1]
     with open(path, "rb") as f:
-        r = client.post(f"{BASE}/files/upload",
+        r = client.post(f"{BASE}/api/files/upload",
                         files={"file": (fname, f, "application/pdf")})
     r.raise_for_status()
     data = r.json()
@@ -53,7 +54,7 @@ def _upload(client: httpx.Client, path: str) -> int:
 def _wait_task(client: httpx.Client, task_id: int, timeout: int = 600) -> dict | None:
     t0 = time.time()
     while time.time() - t0 < timeout:
-        r = client.get(f"{BASE}/tasks/{task_id}")
+        r = client.get(f"{BASE}/api/tasks/{task_id}")
         r.raise_for_status()
         t = r.json()
         if t["status"] in ("WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"):
@@ -78,7 +79,7 @@ def main() -> None:
                task["status"])
 
         print("\n[2] result 契约字段（§5.2 同步 JSON 变体）")
-        r = c.get(f"{BASE}/tasks/{tid}/result")
+        r = c.get(f"{BASE}/api/tasks/{tid}/result")
         r.raise_for_status()
         data = r.json()
         answer = data.get("answer")
@@ -113,7 +114,7 @@ def main() -> None:
             print(f"  样例: {json.dumps(tools[0], ensure_ascii=False)[:200]}")
 
         print("\n[3] 评测后清理任务（决策 #41：不 resume、不留假 review）")
-        r = c.delete(f"{BASE}/tasks/{tid}")
+        r = c.delete(f"{BASE}/api/tasks/{tid}")
         _check("delete_task 成功", r.status_code == 200, f"HTTP {r.status_code} {r.text[:100]}")
 
     print(f"\n========== 结果: {len(_passed)} 通过 / {len(_failed)} 失败 ==========")

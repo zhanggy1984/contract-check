@@ -3,12 +3,13 @@
 
 m1-m5 合法签署形态（期望 SUCCESS + 0 违规）；m6-m7 签字/签章空白缺陷（期望检出）。
 """
+import os
 import sys
 import time
 
 import httpx
 
-BASE = "http://127.0.0.1:8001"
+BASE = os.environ.get("CC_BASE", "http://127.0.0.1:8001")
 DIR = r"D:/study/aiprojcet/contract-check/data/test-contracts"
 CASES = [
     ("cc_gen_m1_rep_sign.pdf", "m1_rep_sign", "legal"),

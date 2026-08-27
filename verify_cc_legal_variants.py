@@ -4,12 +4,13 @@
 l1-l6 为合法签署形态（期望 SUCCESS + 0 违规，即不误报）；
 l7 为电子签章形态下的缺方对照（期望检出 single_party，验证电子签章不因格式特殊而漏检）。
 """
+import os
 import sys
 import time
 
 import httpx
 
-BASE = "http://127.0.0.1:8001"
+BASE = os.environ.get("CC_BASE", "http://127.0.0.1:8001")
 DIR = r"D:/study/aiprojcet/contract-check/data/test-contracts"
 CASES = [
     ("cc_gen_l1_esign.pdf", "l1_esign", "legal"),

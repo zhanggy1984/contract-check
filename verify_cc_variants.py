@@ -12,12 +12,13 @@
 
 宿主运行：BASE=http://127.0.0.1:8001（cc backend 宿主端口）；trust_env=False 防撞系统代理。
 """
+import os
 import sys
 import time
 
 import httpx
 
-BASE = "http://127.0.0.1:8001"
+BASE = os.environ.get("CC_BASE", "http://127.0.0.1:8001")
 DIR = r"D:\study\aiprojcet\contract-check\data\test-contracts"
 FILES = [
     ("cc_gen_good.pdf", "good"),         # 期望 0 违规
