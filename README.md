@@ -20,9 +20,9 @@
 - [八、目录结构](#八目录结构)
 - [九、测试与验收](#九测试与验收)
 - [十、开发指南](#十开发指南)
-- [十一、运维与故障恢复](#十一运维与故障恢复)
+- [十一、常见问题](#十一常见问题)
 - [十二、已知限制与优化方向](#十二已知限制与优化方向)
-- [十三、版本记录](#十三版本记录)
+- [十四、附录：运维与故障恢复](#十三附录运维与故障恢复)
 
 ---
 
@@ -52,26 +52,34 @@
 
 ## 二、系统架构
 
-### 系统拓扑（2 应用容器 + 共享 infra）
-
 ```mermaid
 graph TB
-    subgraph "客户端入口"
-        FE["frontend（Vue3 + nginx :80）<br/>Vite 构建 + /api 反代 → api-gateway"]
+    subgraph 客户端入口
+        WEB["浏览器<br/>Vue3 + Element Plus"]
+        NGINX["nginx :80（宿主 :8088）<br/>静态服务 + /api 反代 → 网关"]
         GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID + 限流"]
     end
-    subgraph "backend 四层架构（逻辑分域 · 单进程）"
-        L1["交互层 app/api/*<br/>路由 · 鉴权 · 请求解析 · 结果格式化"]
-        L2["控制层 app/service + app/graph<br/>任务编排 · 状态管理 · LangGraph HITL"]
-        L3["能力层 app/tools + parser + ocr + validation + report<br/>registry/executors · 解析 · OCR · 校验 · 报告"]
-        L4["资源层 app/db + ontology + llm + decision_recorder<br/>ORM/序列化 · 本体 · LLM 客户端 · 审计"]
+    subgraph 后端四层架构
+        subgraph 交互层["交互层 app/api/"]
+            L1["backend FastAPI :8003<br/>路由 · 鉴权 · 请求解析 · 结果格式化（薄）"]
+        end
+        subgraph 控制层["控制层 app/service + app/graph"]
+            L2["任务编排 · 状态管理 · LangGraph HITL"]
+        end
+        subgraph 能力层["能力层 app/tools + parser + ocr + validation + report"]
+            L3["registry/executors · 解析 · OCR · 校验 · 报告"]
+        end
+        subgraph 资源层["资源层 app/db + ontology + llm + decision_recorder + config"]
+            L4["ORM/序列化 · 本体 · LLM 客户端 · 审计"]
+        end
     end
-    subgraph "外部依赖"
+    subgraph 外部依赖
         DS["DeepSeek LLM<br/>抽取 · 语义校验"]
         MYSQL[(MySQL 8<br/>业务表 + checkpoint + token_usage)]
     end
 
-    FE --> GATEWAY
+    WEB --> NGINX
+    NGINX --> GATEWAY
     GATEWAY --> L1
     L1 --> L2
     L2 --> L3
@@ -80,7 +88,7 @@ graph TB
     L4 --> DS
 ```
 
-> 箭头即**调用方向**：客户端请求经 nginx → 网关 → 交互层，**单向逐层下钻**（交互 → 控制 → 能力 → 资源），结果自下而上返回；DeepSeek / MySQL 等外部依赖仅由资源层访问。分层细节与依赖规则见下文「四层逻辑分层」。
+> 箭头即**调用方向**：客户端请求经 nginx → 网关 → 交互层，**单向逐层下钻**（交互 → 控制 → 能力 → 资源，控制层不直连资源层、经能力层编排），结果自下而上返回；DeepSeek / MySQL 等外部依赖仅由资源层访问。分层细节与依赖规则见下文「后端代码分层：四层单向依赖」。
 
 **对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: cc.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。宿主端口映射的 backend 地址（如 `localhost:8003`）仅供开发调试 / 评测直连，绕过网关。
 
@@ -101,7 +109,7 @@ graph TB
 - 任务状态由 `check_task` 表查询；图运行状态由 `langgraph-checkpoint-mysql` 持久化（`thread_id = task-{id}`），进程重启可恢复；
 - 任一节点异常 / 取消 / 超时 → 任务置 FAILED / CANCELLED 兜底。
 
-### 四层逻辑分层（交互 → 控制 → 能力 → 资源）
+### 后端代码分层：四层单向依赖
 
 代码按职责分四层，依赖**单向向下**：上层可依赖下层，下层绝不反向依赖上层；**交互层只经控制层访问能力/资源**。
 
@@ -121,6 +129,8 @@ graph TB
   `rule_service(db, ...)`（控制层），`get_db` 仅作 DI 注入点，无直连查询。
 - **能力接口**：工具经 `tools/registry.py` + `executors.py` 统一暴露，图节点只经此层访问能力。
 - **LLM 客户端**：`llm/llm_client.get_chat_model()` 惰性单例（lru_cache），全进程共享一个 ChatOpenAI。
+
+**收敛状态（如实）**：上图为**依赖规则（目标架构）**。当前控制层 `check_task_service` / `graph/nodes.py` 仍直连资源层 `app.db` / `app.ontology`（图节点除经 `tools` 访问能力层外，还直接读写 db 与本体），正在随重构逐项下沉——最终依赖严格为 交互 → 控制 → 能力 → 资源 单向、控制层只经能力层访问资源层。
 
 ### 状态与记忆
 
@@ -285,16 +295,16 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 
 ## 六、技术栈一览
 
-| 域 | 选型 |
-|----|------|
-| 编排 | LangGraph（官方 human-in-the-loop）+ langgraph-checkpoint-mysql（锁版本） |
-| 后端 | Python 3.11 + FastAPI + SQLAlchemy 2.0 + PyMySQL |
-| LLM | DeepSeek（langchain-openai，json_mode，max_tokens 8192，429 退避，截断恢复） |
-| 本体 | owlready2（OWL/RDF，版本 md5 落库）+ rdflib 执行 SPARQL（版本显式钉死） |
-| 解析 | PyMuPDF（PDF）、python-docx（Word）、PaddleOCR 3.x（扫描件，置信度阈值 + 失败降级） |
-| 前端 | Vue3 + Vite + Element Plus + axios（轮询任务状态） |
-| 报告 | reportlab（PDF，中文字体 bundle）+ openpyxl（Excel） |
-| 测试 | unittest（backend，393 项全绿） |
+| 层 | 技术 | 说明 |
+|----|------|------|
+| 编排 | LangGraph + langgraph-checkpoint-mysql（锁版本） | 官方 human-in-the-loop，任务状态机持久化 |
+| 后端 | Python 3.11 + FastAPI + SQLAlchemy 2.0 + PyMySQL | 异步全链路，OpenAPI 自动文档 |
+| LLM | DeepSeek（langchain-openai） | json_mode、max_tokens 8192、429 退避、截断恢复 |
+| 本体 | owlready2 + rdflib | OWL/RDF（版本 md5 落库）+ SPARQL 执行（版本显式钉死） |
+| 解析 | PyMuPDF + python-docx + PaddleOCR 3.x | PDF / Word / 扫描件，置信度阈值 + 失败降级 |
+| 前端 | Vue3 + Vite + Element Plus + axios | 轮询任务状态 |
+| 报告 | reportlab + openpyxl | PDF（中文字体 bundle）/ Excel 导出 |
+| 测试 | unittest | backend 393 项全绿 |
 
 ---
 
@@ -445,9 +455,44 @@ npm run dev                                # Vite 开发服务器，/api 已反�
 
 ---
 
-## 十一、运维与故障恢复（单用户内网最小运维集）
+## 十一、常见问题
 
-定位：单用户内网真实使用，运维只覆盖「数据不丢、能恢复、不被拖垮」三件事，不引入监控 / 告警 / 多实例。
+| 现象 | 处理 |
+|------|------|
+| 启动失败 / 服务不健康 | `docker compose ps` 看 backend / frontend 是否全部 Up + healthy；`docker compose logs -f backend` 看启动日志（鉴权缺失 / LLM 外发 WARN） |
+| 登录 / 受保护接口 503 | `AUTH_USERNAME` / `AUTH_PASSWORD` 或 `JWT_SECRET` 未配置（fail-closed 拒启），补 `backend/.env` 后 `docker compose up -d --build backend` |
+| 上传失败 / 不支持格式 | 确认文件 ≤50MB、支持 PDF / Word / 扫描件；老版 `.doc` 拒绝，先另存为 `.docx`；损坏文件标 FAILED |
+| 任务排队不执行 | `MAX_CONCURRENT_TASKS` 默认 3，超限任务排队等待空位、不拒绝 |
+| 扫描件处理慢 | PaddleOCR CPU 推理 + 首次下载模型，大批量以分钟计；`TASK_TIMEOUT_SECONDS` 已预留 |
+| 崩溃后结果缺失 | 同 LangGraph thread_id 从最后 checkpoint 续跑，抽取 / 语义节点带崩溃重放守卫（详见[附录运维](#十三附录运维与故障恢复)） |
+| 想重置 / 恢复数据 | `docker compose down` 保留数据卷；误删用每日备份恢复（详见[附录运维](#十三附录运维与故障恢复)） |
+
+---
+
+## 十二、已知限制与优化方向
+
+**如实说明当前已知的边界问题：**
+
+1. **合同内容外发 DeepSeek（唯一对外通道）**：抽取与语义校验必须调用 LLM，合同文本会发送到 `DEEPSEEK_BASE_URL`。内网 / 敏感合同场景须自建或接入内网 LLM 端点（改 `backend/.env` 后重建容器）；文档解析本身全本地，不出域。
+2. **语义规则边界有误报（已知接受）**：语义校验依赖 LLM 抽取质量，个别边界形态存在已知误报——如**单方签署**规则在"签章栏只有空白下划线占位、无凭证词"的合同上约 1/3 触发 `single_party` 误报（签章栏语义依赖原文措辞）。已接受现状，靠 `WAITING_REVIEW` 人工审核兜底，不误判为通过。
+3. **扫描件 OCR 慢**：PaddleOCR 为 CPU 推理，首次需下载模型（`TASK_TIMEOUT_SECONDS` 已预留），大批量扫描件耗时以分钟计。
+4. **前端轮询而非推送**：前端以固定间隔轮询任务状态，实时性受轮询间隔限制（无 SSE / WebSocket）。单任务体验可接受，但"立即感知终态"有秒级延迟。
+5. **单用户内网定位**：JWT 单账号、无多用户 / 角色权限（法务 / 审计 / 管理员），无租户隔离；四层为**逻辑分域、物理不拆**（backend 单容器，能力层与资源层同进程）。
+6. **单元测试 import 顺序敏感**：个别测试依赖模块加载顺序引导配置（已知，正常按默认顺序运行即可）。
+
+**优化方向（未实施，需评估后再动）：**
+
+- 多用户 + 角色权限模型（当前单用户）；
+- SSE / WebSocket 推送替代轮询（任务终态即时感知）；
+- 物理拆分 AI 服务为独立容器（演进路径：目录归拢 `app/ai/` 或独立服务进程，依赖规则不变）；
+- 语义规则类型扩展 + 误报样本回流（缓解限制 2）；
+- 语义校验降级策略可配置（当前降级 LOW → 强制人工，见上线加固）。
+
+---
+
+## 十三、附录：运维与故障恢复
+
+定位（单用户内网最小运维集）：单用户内网真实使用，运维只覆盖「数据不丢、能恢复、不被拖垮」三件事，不引入监控 / 告警 / 多实例。
 
 ### 每日备份（必做）
 
@@ -485,42 +530,6 @@ docker compose up -d
 
 - 探针：`curl http://127.0.0.1:8003/api/health` 返回 `{"status":"ok","auth_required":true}`（容器内 `:8000`）；
 - 日志：`docker compose logs -f backend`；启动时可见鉴权缺失 / LLM 外发 WARN（见「对数据安全」）。
-
----
-
-## 十二、已知限制与优化方向
-
-**如实说明当前已知的边界问题：**
-
-1. **合同内容外发 DeepSeek（唯一对外通道）**：抽取与语义校验必须调用 LLM，合同文本会发送到 `DEEPSEEK_BASE_URL`。内网 / 敏感合同场景须自建或接入内网 LLM 端点（改 `backend/.env` 后重建容器）；文档解析本身全本地，不出域。
-2. **语义规则边界有误报（已知接受）**：语义校验依赖 LLM 抽取质量，个别边界形态存在已知误报——如**单方签署**规则在"签章栏只有空白下划线占位、无凭证词"的合同上约 1/3 触发 `single_party` 误报（签章栏语义依赖原文措辞）。已接受现状，靠 `WAITING_REVIEW` 人工审核兜底，不误判为通过。
-3. **扫描件 OCR 慢**：PaddleOCR 为 CPU 推理，首次需下载模型（`TASK_TIMEOUT_SECONDS` 已预留），大批量扫描件耗时以分钟计。
-4. **前端轮询而非推送**：前端以固定间隔轮询任务状态，实时性受轮询间隔限制（无 SSE / WebSocket）。单任务体验可接受，但"立即感知终态"有秒级延迟。
-5. **单用户内网定位**：JWT 单账号、无多用户 / 角色权限（法务 / 审计 / 管理员），无租户隔离；四层为**逻辑分域、物理不拆**（backend 单容器，能力层与资源层同进程）。
-6. **单元测试 import 顺序敏感**：个别测试依赖模块加载顺序引导配置（已知，正常按默认顺序运行即可）。
-
-**优化方向（未实施，需评估后再动）：**
-
-- 多用户 + 角色权限模型（当前单用户）；
-- SSE / WebSocket 推送替代轮询（任务终态即时感知）；
-- 物理拆分 AI 服务为独立容器（演进路径：目录归拢 `app/ai/` 或独立服务进程，依赖规则不变）；
-- 语义规则类型扩展 + 误报样本回流（缓解限制 2）；
-- 语义校验降级策略可配置（当前降级 LOW → 强制人工，见上线加固）。
-
----
-
-## 十三、版本记录
-
-| 版本 | 日期 | 核心内容 |
-|------|------|----------|
-| **2.3.2** | 2026-08-28 | 四层逻辑分层收口：交互层只经 service（api 不再直连 db/parser/report）、llm 惰性单例、会话模式 svc、修复 upload detached 500 |
-| **2.3.1** | 2026-08-28 | 上线加固：JWT 鉴权 fail-closed（503）、语义降级强制人工、任务并发闸 `MAX_CONCURRENT_TASKS`、备份脚本验证还原、README 出域如实化；本地 mock LLM 端点隔离语义降级 e2e |
-| **2.3.0** | 2026-08-27 | P1/P2 健壮性整改：function calling 决策化（外部能力工具化 + 受约束 LLM 决策）、输入侧注入加固 + 8 步安全清洗、LLM 异常统一降级 + 超时重试配置化、parser P0 数据完整性（docx 表格/文本框、编号子项、混合扫描页级 OCR）、崩溃重放守卫、僵尸线程终态防覆盖、resume 崩溃自愈、OCR 质量指标、分页防 DoS、提交审核终态统一刷新 |
-| **2.2.1** | 2026-08-26 | README 补统一 API 网关对外链路说明 |
-| **2.2.0** | 2026-08-26 | 接入统一 API 网关（Host 虚拟域名路由）+ trace.py traceId 对齐 |
-| **2.1.0** | 2026-08-25 | P3.1 切换共享 infra：去除自带中间件（MySQL），改连共享 infra |
-| **2.0** | 2026-08-24 | B.4 评测契约修复与稳定性加固（结果契约 / 契约清单 / token 落库）；规则管理体验增强；README 重构 + solution/task 文档入库 |
-| **1.0** | 2026-08-11 | 本体驱动合同校验系统初版（抽取-混合校验-人工审核闭环） |
 
 ---
 
