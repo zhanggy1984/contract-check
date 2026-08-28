@@ -167,7 +167,7 @@ def startup() -> None:
     _ensure_unique_index(engine, "ontology_version", "md5")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
     svc.cleanup_terminal_checkpoints()  # 启动兜底：清理终态任务 checkpoint（T4.3-2）
-    files.cleanup_orphan_files()        # 启动兜底：清理孤儿文件（T4.3-3）
+    svc.cleanup_orphan_files()          # 启动兜底：清理孤儿文件（T4.3-3）
     svc.recover_pending()    # 启动恢复未完成任务
 
 

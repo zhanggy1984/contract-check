@@ -11,7 +11,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from app.api import contracts
-from app.api.tasks import (
+from app.service.check_task_service import (
     _extraction_summary,
     _rule_result_to_tool,
     _task_answer,

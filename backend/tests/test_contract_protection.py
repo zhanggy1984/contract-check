@@ -11,8 +11,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
 
-from app.api.tasks import get_task_result
 from app.db.models import CheckRule
+from app.service import check_task_service as svc
 
 
 class _Q:
@@ -33,6 +33,12 @@ class FakeDb:
     def __init__(self, task):
         self._task = task
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
     def get(self, model, task_id):
         return self._task
 
@@ -40,6 +46,12 @@ class FakeDb:
         if model is CheckRule:
             return _Q([])
         return _Q([])  # Violation / RuleCheckResult 均空，聚焦契约结构
+
+
+def _get_result(task):
+    """经 svc.get_task_result 取结果：桩 SessionLocal 注入 FakeDb，隔离真实 DB。"""
+    with mock.patch.object(svc, "SessionLocal", return_value=FakeDb(task)):
+        return svc.get_task_result(1)
 
 
 def _task_with(decision_json, usage_json):
@@ -61,7 +73,7 @@ class TestContractProtection(unittest.TestCase):
                       "usage": {"total_tokens": 3}, "ts": "2026-01-01T00:00:00"}]
         task = _task_with(json.dumps(decisions, ensure_ascii=False),
                           json.dumps({"total_tokens": 100}, ensure_ascii=False))
-        result = get_task_result(1, db=FakeDb(task))
+        result = _get_result(task)
         self.assertIn("decisions", result, "result 必须含独立 decisions 顶层键")
         self.assertEqual(result["decisions"], decisions, "decisions 逐字等于 decision_json")
 
@@ -71,7 +83,7 @@ class TestContractProtection(unittest.TestCase):
             json.dumps([{"tool": "decide_ocr", "usage": {"total_tokens": 3}}]),
             json.dumps({"total_tokens": 100}),
         )
-        result = get_task_result(1, db=FakeDb(task))
+        result = _get_result(task)
         self.assertEqual(result["usage"]["total_tokens"], 100, "决策 usage 不得混入评测契约")
         self.assertEqual(result["decisions"][0]["usage"]["total_tokens"], 3)
 
@@ -81,7 +93,7 @@ class TestContractProtection(unittest.TestCase):
             json.dumps([{"tool": "decide_ocr", "decision": "ocr"}]),
             json.dumps({"total_tokens": 1}),
         )
-        result = get_task_result(1, db=FakeDb(task))
+        result = _get_result(task)
         self.assertEqual(result["tool_calls"], [])
         self.assertNotIn("decide_ocr", json.dumps(result["tool_calls"], ensure_ascii=False))
 
@@ -91,7 +103,7 @@ class TestContractProtection(unittest.TestCase):
             json.dumps([{"tool": "decide_ocr", "decision": "skip"}]),
             json.dumps({"total_tokens": 100}),
         )
-        result = get_task_result(1, db=FakeDb(task))
+        result = _get_result(task)
         for key in ("answer", "usage", "timing", "tool_calls", "meta",
                     "standard_json", "violations", "rule_results", "id", "status"):
             self.assertIn(key, result)

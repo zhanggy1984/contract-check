@@ -173,6 +173,36 @@ graph TB
 - 任务状态由 `check_task` 表查询；图运行状态由 `langgraph-checkpoint-mysql` 持久化（`thread_id = task-{id}`），进程重启可恢复；
 - 任一节点异常 / 取消 / 超时 → 任务置 FAILED / CANCELLED 兜底。
 
+### 四层逻辑分层（交互 → 控制 → 能力 → 资源）
+
+代码按职责分四层，依赖单向向下：上层可依赖下层，下层绝不反向依赖上层；**交互层只经控制层访问能力/资源**。
+
+| 层 | 职责 | 落点 |
+|---|---|---|
+| 交互层 | HTTP 契约 + 鉴权 + 请求解析 + 结果格式化 | `app/api/*.py`（只做路径/参数校验、状态码、响应组装；不直连 DB/解析/报告） |
+| 控制层 | 任务编排 + 状态管理 + 路由 | `app/service/check_task_service.py` + `app/graph/`（LangGraph 状态机 + HITL） |
+| 能力层 | 执行具体操作 | `app/tools/`（registry + executors）、`app/parser/`、`app/ocr/`、`app/validation/`、`app/report/` |
+| 资源层 | 数据 / 知识 / LLM / 审计抽象 | `app/db/`、`app/ontology/`、`app/llm/`、`app/decision_recorder/`、`app/config` |
+
+关键约束：
+
+- **依赖单向**：交互 → 控制 → 能力 → 资源；低层不 import 上层（无环路，已验证）。
+- **交互层收口**：`api/*.py` 无 `db.query`/`db.get` 直连、不 import `parser/report/db.models`——统一经
+  `check_task_service` 委托（`get_task`/`get_task_result`/`render_report`/`save_uploaded_file`/
+  `list_violations`/`update_violation_status` 等）。`api/rules.py` 为例外：其 CRUD 已整体委托
+  `rule_service(db, ...)`（控制层），`get_db` 仅作 DI 注入点，无直连查询。
+- **能力接口**：工具经 `tools/registry.py` + `executors.py` 统一暴露，图节点只经此层访问能力。
+- **LLM 客户端**：`llm/llm_client.get_chat_model()` 惰性单例（lru_cache），全进程共享一个 ChatOpenAI。
+
+### 状态与记忆
+
+- **对话状态 = 单任务流水线状态**：由 `check_task` 表（status/progress/error）+ LangGraph checkpoint
+  （`thread_id = task-{id}`，进程重启可续跑）共同表示。本项目是"单合同 → 流水线"模式，不维护多轮对话上下文。
+- **记忆 = 知识 + 历史 + 审计**三部分：
+  - 知识：`app/ontology/`（本体 / 规则，单一事实源）；
+  - 历史：`app/db/`（任务、合同文件、violation、校验结果落库）；
+  - 审计：决策痕迹（function calling 决策引擎 → `decision_json`）+ LLM token 用量（`token_usage_json`）落库。
+
 ---
 
 ## 五、技术栈一览
@@ -280,14 +310,14 @@ contract-check/
 │   │   ├── llm/              # llm_client（json_mode/截断恢复）+ extractor（抽取/分段重抽）
 │   │   ├── ontology/         # contract_ontology.ttl + loader / schema_mapper / rule_generator
 │   │   ├── validation/       # sparql_executor / semantic_evaluator / persist（单事务落库）
-│   │   ├── service/          # check_task_service（状态机/恢复）+ rule_service（规则管理）
+│   │   ├── service/          # check_task_service（状态机/恢复/交互层收口）+ rule_service（规则管理）
 │   │   ├── parser/           # PDF / Word 解析
 │   │   ├── ocr/              # PaddleOCR 服务
 │   │   ├── report/           # PDF（reportlab）/ Excel（openpyxl）报告
-│   │   └── common/ db/       # 常量 / DB session 与 models
+│   │   └── common/ db/       # 常量 / DB session、models 与序列化（serializers）
 │   ├── rules/manual/         # 人工规则：3 条 SPARQL（缺甲方/缺乙方/终止早于生效）
 │   │                          #           + 4 条语义 JSON（缺违约条款/权利义务不对等/技术标准/单方签署）
-│   ├── tests/                # 392 项单元测试
+│   ├── tests/                # 393 项单元测试
 │   ├── scripts/              # 验收/冒烟/PDF 生成脚本
 │   ├── requirements*.txt / Dockerfile / entrypoint.sh / fonts/
 ├── frontend/                 # 前端（Vue3 + Vite + Element Plus）
@@ -311,7 +341,7 @@ contract-check/
 
 ## 九、测试与验收
 
-### 单元测试（392 项全绿）
+### 单元测试（393 项全绿）
 
 ```bash
 cd backend

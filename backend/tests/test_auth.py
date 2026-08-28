@@ -6,6 +6,7 @@ tearDown 恢复原值，不污染其他测试。
 """
 import os
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +14,7 @@ from app.common.security import create_token, verify_token
 from app.config import settings
 from app.db.session import get_db
 from app.main import _is_external_llm, app
+from app.service import check_task_service as svc
 
 
 class _StubDb:
@@ -46,6 +48,11 @@ class AuthBase(unittest.TestCase):
         settings.jwt_secret = "test-secret"
         settings.jwt_expire_minutes = 60
         app.dependency_overrides[get_db] = _StubDb
+        # 交互层收口后 /api/tasks list 走 svc（内部 SessionLocal），桩方法防触真实库；
+        # 鉴权测试只关心 200/401 分支，list 返回空页即可
+        self._svc_patch = mock.patch.object(
+            svc, "list_tasks", return_value={"total": 0, "page": 1, "size": 10, "items": []})
+        self._svc_patch.start()
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -53,6 +60,8 @@ class AuthBase(unittest.TestCase):
             for k, v in self._orig.items():
                 setattr(settings, k, v)
         app.dependency_overrides.clear()
+        if hasattr(self, "_svc_patch"):
+            self._svc_patch.stop()
 
 
 class TestJwt(unittest.TestCase):

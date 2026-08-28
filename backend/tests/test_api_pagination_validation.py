@@ -5,11 +5,13 @@
 - confirm_user 超 50 → Pydantic max_length 422（对齐 DB VARCHAR(50)，防 DataError 1406）
 - 上传文件名超 255 → 截断落库（DB VARCHAR(255)，防 DataError 1406）
 
-TestClient 非 with 模式不发 lifespan（不触发 startup 连 MySQL），get_db 用 stub 覆盖；
+TestClient 非 with 模式不发 lifespan（不触发 startup 连 MySQL）；交互层收口后
+list_tasks/list_violations 已委托 service，桩 svc 方法防触真实库；rules 仍经 get_db 保留 stub。
 confirm_user / _sanitize_filename 走纯单测不依赖 app。unittest 风格，pytest 作 runner。
 """
 import os
 import unittest
+from unittest import mock
 
 # 全局测试默认关鉴权：Settings 是 import 时单例，本文件按字母序首个导入 app.config，
 # 在此设 env 使整套测试的 Settings 以 auth_enabled=False 初始化（test_auth.py 按需改回）
@@ -18,10 +20,11 @@ os.environ.setdefault("AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.files import _sanitize_filename
 from app.api.violations import StatusBody
 from app.db.session import get_db
 from app.main import app
+from app.service.check_task_service import _sanitize_filename
+from app.service import check_task_service as svc
 
 
 class _StubDb:
@@ -59,12 +62,24 @@ class TestPaginationValidation(unittest.TestCase):
     """非法分页参数在进 handler 前被 422 拦下（TestClient 不触发 startup）。"""
 
     def setUp(self):
+        # 交互层收口后 list 端点走 svc（内部 SessionLocal），桩 svc 方法防触真实库；
+        # rules 仍经 get_db 保留 stub override。
         app.dependency_overrides[get_db] = _StubDb
+        self._svc_patches = [
+            mock.patch.object(svc, "list_tasks",
+                              return_value={"total": 0, "page": 1, "size": 10, "items": []}),
+            mock.patch.object(svc, "list_violations",
+                              return_value={"total": 0, "page": 1, "size": 20, "items": []}),
+        ]
+        for p in self._svc_patches:
+            p.start()
         self.client = TestClient(app)
         self.addCleanup(self._clear_override)
 
     def _clear_override(self):
         app.dependency_overrides.clear()
+        for p in self._svc_patches:
+            p.stop()
 
     def test_tasks_page_zero_rejected(self):
         r = self.client.get("/api/tasks", params={"page": 0})

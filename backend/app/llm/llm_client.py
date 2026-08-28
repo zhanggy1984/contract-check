@@ -5,6 +5,7 @@
 - 429 限流退避：ChatOpenAI 内置 max_retries + 指数退避
 - 截断检测：finish_reason == "length" 时上层降级分段重抽
 """
+import functools
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -20,8 +21,14 @@ class LLMError(RuntimeError):
     """LLM 调用失败（网络/超时/限流/服务端错误，SDK 重试耗尽）。调用方应降级而非裸抛。"""
 
 
+@functools.lru_cache(maxsize=1)
 def get_chat_model() -> ChatOpenAI:
-    """DeepSeek chat 模型（json_object 模式，幂等创建不缓存以便调整参数）。"""
+    """DeepSeek chat 模型（json_object 模式）。
+
+    惰性单例（四层分层·资源层收编）：extractor/semantic_evaluator 多次 call_json 共享同一
+    ChatOpenAI 实例，省去每次构造的配置解析与连接开销（openai 客户端线程安全，可跨任务并发；
+    换模型/端点需重启进程——环境变量在启动时解析）。
+    """
     return ChatOpenAI(
         model=settings.deepseek_model,
         api_key=settings.deepseek_api_key,

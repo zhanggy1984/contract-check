@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.api import files
+from app.service import check_task_service as svc
 
 
 class _FakeDb:
@@ -45,11 +45,11 @@ class TestOrphanCleanup(unittest.TestCase):
     def test_deletes_only_orphans(self):
         tmp, up, par = self._setup()
         try:
-            with patch("app.api.files.UPLOAD_DIR", up), \
-                 patch("app.api.files.PARSED_DIR", par), \
-                 patch("app.api.files.SessionLocal", _FakeDb), \
-                 patch("app.api.files.STALE_ORPHAN_MINUTES", -1):  # 禁用 mtime 守卫
-                n = files.cleanup_orphan_files()
+            with patch("app.service.check_task_service.UPLOAD_DIR", up), \
+                 patch("app.service.check_task_service.PARSED_DIR", par), \
+                 patch("app.service.check_task_service.SessionLocal", _FakeDb), \
+                 patch("app.service.check_task_service.STALE_ORPHAN_MINUTES", -1):  # 禁用 mtime 守卫
+                n = svc.cleanup_orphan_files()
             self.assertEqual(n, 3)  # bbbb.pdf + cccc.txt + dddd.docx
             # 有记录的原件/txt 保留
             self.assertTrue((up / "aaaa.pdf").exists())
@@ -68,11 +68,11 @@ class TestOrphanCleanup(unittest.TestCase):
         tmp, up, par = self._setup()
         try:
             before = sorted(p.name for p in up.glob("*")) + sorted(p.name for p in par.glob("*"))
-            with patch("app.api.files.UPLOAD_DIR", up), \
-                 patch("app.api.files.PARSED_DIR", par), \
-                 patch("app.api.files.SessionLocal", _FakeDb), \
-                 patch("app.api.files.STALE_ORPHAN_MINUTES", -1):  # 禁用 mtime 守卫
-                files.cleanup_orphan_files()
+            with patch("app.service.check_task_service.UPLOAD_DIR", up), \
+                 patch("app.service.check_task_service.PARSED_DIR", par), \
+                 patch("app.service.check_task_service.SessionLocal", _FakeDb), \
+                 patch("app.service.check_task_service.STALE_ORPHAN_MINUTES", -1):  # 禁用 mtime 守卫
+                svc.cleanup_orphan_files()
             # aaaa 两处必须仍在
             self.assertIn("aaaa.pdf", [p.name for p in up.glob("*")])
             self.assertIn("aaaa.txt", [p.name for p in par.glob("*")])
