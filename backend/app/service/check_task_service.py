@@ -1,6 +1,7 @@
 """任务执行：后台跑图、resume（CAS 抢占+失败回退）、cancel、删除、启动恢复。"""
 import asyncio
 import logging
+import threading
 from pathlib import Path
 
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
@@ -18,6 +19,23 @@ logger = logging.getLogger(__name__)
 
 # 取消短路由各节点入口检查 CANCELLED 实现；此处 asyncio.to_thread 不阻塞事件循环
 _ACTIVE = set()  # 运行中 task_id，供 cancel 判断（Phase 0 简化）
+
+# 任务并发闸（运维最小集）：限制同时运行的图流水线数，防连传 N 个合同 → N 条 LLM 流水线并发。
+# 线程级 Semaphore（不用绑定 loop 的 asyncio 版）：run_task_async 与 resume_task 的图执行都跑在
+# asyncio.to_thread 的 worker 线程（无事件循环），asyncio.Semaphore 无法覆盖 resume 旁路；
+# 且模块级 asyncio 单例在测试里跨 asyncio.run 报错。threading 版两入口统一收口，
+# 超限排队不拒绝（先到先跑）；排队不计入超时预算（_go 里 acquire 在 wait_for 之前）
+_sem = None
+_sem_lock = threading.Lock()
+
+
+def _get_sem() -> threading.Semaphore:
+    global _sem
+    if _sem is None:  # 懒创建：测试用 settings 覆盖后置 None 重建；GIL 下双写窗口用锁兜底
+        with _sem_lock:
+            if _sem is None:
+                _sem = threading.Semaphore(settings.max_concurrent_tasks)
+    return _sem
 
 PARSED_DIR = Path("data/parsed")  # 物理解析文本目录（与 files.py 保持一致）
 
@@ -128,8 +146,15 @@ def run_task_async(task_id: int) -> None:
 
     async def _go():
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_run_flow, task_id), timeout=timeout)
+            # 并发闸：先在 worker 线程排队拿闸（不阻塞事件循环），空位释放才进 _run_flow；
+            # acquire 在 wait_for 之前，排队不计入超时预算；release 放 finally 保证按时释放
+            sem = _get_sem()
+            await asyncio.to_thread(sem.acquire)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(_run_flow, task_id), timeout=timeout)
+            finally:
+                sem.release()
         except asyncio.TimeoutError:
             update_status(task_id, TaskStatus.FAILED.value,
                           error=f"任务执行超时（超过 {timeout} 秒）")
@@ -178,7 +203,10 @@ def resume_task(task_id: int, reviews: list) -> bool:
         if res.rowcount == 0:
             return False
     try:
-        _run_flow(task_id, reviews={"reviews": reviews})
+        # 并发闸：resume 与首次运行共享同一额度（防"上传 3 + resume 3"同时冲出上限）。
+        # resume 在 worker 线程执行（tasks.py to_thread），阻塞拿闸不卡事件循环
+        with _get_sem():
+            _run_flow(task_id, reviews={"reviews": reviews})
         _cleanup_if_terminal(task_id)  # resume 到 SUCCESS 后清理（T4.3-2）
         return True
     except Exception:

@@ -18,6 +18,8 @@ data/parsed/
 data/**/*.pdf
 data/**/*.docx
 data/**/*.png
+# MySQL 备份产物（含合同数据，仅本机留存，禁止入库）
+data/backups/
 # 评测运行结果（verify_cc_* 产物，可重跑生成不入库）
 data/test-contracts/cc_*_results.json
 # backend 运行产生的数据目录（测试合同、解析产物、报告截图等，均不入库）

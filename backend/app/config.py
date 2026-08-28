@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     # 任务执行超时（秒）：图执行超过该值标记 FAILED（软超时，后台线程继续跑真实结果）
     task_timeout_seconds: int = 600
 
+    # 认证（单用户 JWT 登录；评测/本地开发 AUTH_ENABLED=false 跳过）。
+    # auth_password / jwt_secret 无默认值——未配置时登录与鉴权失败关闭（fail-closed），防裸奔部署
+    auth_enabled: bool = True
+    auth_username: str = "admin"
+    auth_password: str = ""
+    jwt_secret: str = ""
+    jwt_expire_minutes: int = 720          # 12h
+
+    # 任务并发上限：同时运行的图流水线数（asyncio.Semaphore 排队，防连传打爆 LLM 限流）
+    max_concurrent_tasks: int = 3
+
     # 工具决策（function calling 决策引擎，见 app/graph/decisions.py）
     tool_decision_enabled: bool = True            # 决策引擎总开关（False = 零决策调用，回退旧行为）
     ocr_decision_enabled: bool = True             # OCR 决策点开关

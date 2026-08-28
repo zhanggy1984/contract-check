@@ -18,6 +18,8 @@ import time
 
 import httpx
 
+from verify_common import make_client
+
 BASE = os.environ.get("CC_BASE", "http://127.0.0.1:8001")
 DIR = r"D:\study\aiprojcet\contract-check\data\test-contracts"
 FILES = [
@@ -32,7 +34,7 @@ SP_KEY = ("single_party", "单方签署", "单方")
 
 def main() -> int:
     results = []
-    with httpx.Client(timeout=120, trust_env=False) as c:
+    with make_client(BASE) as c:
         for fname, tag in FILES:
             with open(f"{DIR}\\{fname}", "rb") as f:
                 r = c.post(f"{BASE}/api/files/upload",

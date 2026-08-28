@@ -21,7 +21,7 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 logger = logging.getLogger(__name__)
 
-EXT_TYPE = {"pdf": "PDF", "docx": "DOCX", "doc": "DOC"}
+EXT_TYPE = {"pdf": "PDF", "docx": "DOCX"}   # 只列真正受理的类型；.doc 走 EXT_TYPE 未命中统一 400
 MAX_BYTES = settings.max_upload_mb * 1024 * 1024
 UPLOAD_DIR = Path(settings.upload_dir)
 PARSED_DIR = Path("data/parsed")
@@ -92,8 +92,6 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
     ftype = EXT_TYPE.get(ext)
     if ftype is None:
         raise HTTPException(400, "仅支持 PDF / DOCX 文件")
-    if ext == "doc":
-        raise HTTPException(400, "不支持旧版 .doc，请转存为 .docx 或 PDF")
 
     data = await file.read()
     if len(data) > MAX_BYTES:
@@ -113,9 +111,10 @@ async def upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
         try:
             text, page_texts = _extract(ext, storage_path)
         except Exception as e:
-            # F4：损坏/非法文件解析失败 → 明确 400，不留 500（残留文件由孤儿清理兜底）
+            # F4：损坏/非法文件解析失败 → 明确 400，不留 500（残留文件由孤儿清理兜底）。
+            # 回通用文案不泄露内部路径/库错误细节，细节已进日志
             logger.warning("文件解析失败 %s: %s", storage_path, e)
-            raise HTTPException(400, f"文件解析失败：{str(e)[:100]}")
+            raise HTTPException(400, "文件解析失败，请检查文件格式或内容")
         (PARSED_DIR / f"{sha}.txt").write_text(text or "", encoding="utf-8")
         # 混合扫描 PDF：页级文本落库为单一事实来源（parse_node 逐页 OCR 用），
         # has_scanned 由页级派生（存在清洗后为空的页），比整篇判空精确

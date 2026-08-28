@@ -10,6 +10,8 @@ import time
 
 import httpx
 
+from verify_common import make_client
+
 BASE = os.environ.get("CC_BASE", "http://127.0.0.1:8001")
 DIR = r"D:/study/aiprojcet/contract-check/data/test-contracts"
 CASES = [
@@ -26,7 +28,7 @@ TERMINAL = ("SUCCESS", "FAILED", "CANCELLED", "WAITING_REVIEW")
 
 def main() -> int:
     results = []
-    with httpx.Client(timeout=120, trust_env=False) as c:
+    with make_client(BASE) as c:
         for fname, tag, kind in CASES:
             with open(DIR + "/" + fname, "rb") as f:
                 r = c.post(BASE + "/api/files/upload", files={"file": (fname, f, "application/pdf")})

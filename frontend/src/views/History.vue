@@ -40,7 +40,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteTask, listTasks } from '../api'
+import { deleteTask, downloadReportFile, listTasks, saveBlob } from '../api'
 
 const emit = defineEmits(['open'])
 const items = ref([])
@@ -72,10 +72,14 @@ async function load(page) {
 
 function openDetail(row) { emit('open', row.id) }
 
-function downloadReport(taskId, format) {
-  const a = document.createElement('a')
-  a.href = `/api/tasks/${taskId}/report?format=${format}`
-  a.click()
+// 导出报告：<a href> 直链不带 Authorization header，改为带 token 的 axios blob 下载
+async function downloadReport(taskId, format) {
+  try {
+    const res = await downloadReportFile(taskId, format)
+    saveBlob(res, `report_${taskId}.${format === 'pdf' ? 'pdf' : 'xlsx'}`)
+  } catch (e) {
+    ElMessage.error(e?.response?.status === 401 ? '登录已失效，请重新登录' : '导出失败，请重试')
+  }
 }
 
 function doDelete(row) {

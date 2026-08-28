@@ -15,16 +15,20 @@ DATABASE_URL = (
 
 
 def _should_wait(state: TaskState) -> str:
-    """persist 后分流：有 violation 或抽取 INCOMPLETE → 人工审核；否则零 violation 自动 SUCCESS。
+    """persist 后分流：有 violation / 抽取 INCOMPLETE / 语义降级 → 人工审核；否则零 violation 自动 SUCCESS。
 
     - violation > 0：进 mark_waiting → interrupt（人工确认/误报）
     - extraction INCOMPLETE：即使零 violation 也进人工（D2 安全阀——INCOMPLETE 时
       enum/min/pattern 约束规则被 SKIPPED，required 恰好 PASS 时自动通过会掩盖"抽取没抽全"）
-    - 其余（COMPLETE + 零 violation）：直接 finalize（SUCCESS），跳过 interrupt
+    - sem_degraded：语义评估整体降级（LLM 不可用）时零 violation 不自动 SUCCESS，
+      强制人工确认放行（c1 堵"LLM 挂时合同静默通过"；确认后空 reviews resume 走审计留痕）
+    - 其余（COMPLETE + 零 violation + 未降级）：直接 finalize（SUCCESS），跳过 interrupt
     """
     if (state.get("violations_count") or 0) > 0:
         return "await"
     if state.get("extraction_status") == "INCOMPLETE":
+        return "await"
+    if state.get("sem_degraded"):
         return "await"
     return "done"
 

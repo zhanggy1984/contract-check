@@ -22,6 +22,8 @@ import time
 
 import httpx
 
+from verify_common import make_client
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows GBK 控制台编不了 ✓
 
 BASE = os.environ.get("CC_BASE", "http://localhost:8001")
@@ -66,7 +68,7 @@ def _wait_task(client: httpx.Client, task_id: int, timeout: int = 600) -> dict |
 def main() -> None:
     # trust_env=False：宿主开了系统代理（Clash 127.0.0.1:15490），httpx 默认读注册表代理
     # 会把 localhost 请求也送代理 → 502；评测脚本只连内网，必须直连
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0), trust_env=False) as c:
+    with make_client(BASE) as c:
         tid = _upload(c, CONTRACT)
 
         print("\n[1] 轮询任务状态（评测取数点）")

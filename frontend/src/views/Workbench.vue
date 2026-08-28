@@ -4,13 +4,15 @@
     <div v-if="showBack" style="margin-bottom: 12px">
       <el-button size="small" @click="emit('back')">← 返回列表</el-button>
     </div>
-    <!-- 上传 -->
+    <!-- 上传（el-upload 走原生 XHR，不经 axios 拦截器，需显式带 Authorization） -->
     <el-upload
       drag
       action="/api/files/upload"
       name="file"
+      :headers="uploadHeaders"
       :show-file-list="false"
       :on-success="onUploaded"
+      :on-error="onUploadError"
       :disabled="!!task"
       style="margin-bottom: 16px"
     >
@@ -139,7 +141,9 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { cancelTask, getTask, getTaskResult, resumeTask } from '../api'
+import {
+  cancelTask, clearToken, downloadReportFile, getTask, getTaskResult, getToken, resumeTask, saveBlob,
+} from '../api'
 
 const props = defineProps({
   initialTaskId: { type: Number, default: null },
@@ -154,6 +158,9 @@ const reviewMap = ref({})
 const submitting = ref(false)
 let timer = null
 let loadedResult = false
+
+// el-upload 原生 XHR 不会走 axios 拦截器，这里显式注入 token
+const uploadHeaders = computed(() => ({ Authorization: `Bearer ${getToken()}` }))
 
 const statusTagType = (s) => ({
   SUCCESS: 'success', FAILED: 'danger', CANCELLED: 'info',
@@ -179,6 +186,18 @@ function onUploaded(res) {
   ElMessage.success('上传成功，任务已创建')
   reset()
   startPoll(res.task_id)
+}
+
+// el-upload 原生 XHR 失败不经 axios 响应拦截器：401（token 过期）手动清 token + 触发登出，
+// 其余失败给通用提示——否则静态注入的旧 token 上传 401 会陷入"半死会话"无感知
+function onUploadError(err) {
+  if (err?.status === 401) {
+    clearToken()
+    window.dispatchEvent(new CustomEvent('auth:expired'))
+    ElMessage.error('登录已失效，请重新登录')
+    return
+  }
+  ElMessage.error('上传失败，请检查文件后重试')
 }
 
 function reset() {
@@ -227,12 +246,15 @@ async function loadExisting(id) {
   }
 }
 
-// 导出报告：Content-Disposition: attachment 触发浏览器下载
-function downloadReport(format) {
+// 导出报告：<a href> 直链不带 Authorization header，改为带 token 的 axios blob 下载
+async function downloadReport(format) {
   if (!task.value) return
-  const a = document.createElement('a')
-  a.href = `/api/tasks/${task.value.id}/report?format=${format}`
-  a.click()
+  try {
+    const res = await downloadReportFile(task.value.id, format)
+    saveBlob(res, `report_${task.value.id}.${format === 'pdf' ? 'pdf' : 'xlsx'}`)
+  } catch (e) {
+    ElMessage.error(e?.response?.status === 401 ? '登录已失效，请重新登录' : '导出失败，请重试')
+  }
 }
 
 onMounted(() => {

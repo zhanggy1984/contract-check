@@ -2,7 +2,7 @@
 
 > **本体驱动 + 大模型抽取 + 混合校验 + 人工审核闭环**的合同智能审查系统：上传合同（PDF / Word / 扫描件），自动抽取为结构化标准数据，按本体定义的规则做确定性 + 语义双重校验，全量落库并进入人工审核闭环，最终输出校验报告。
 
-本系统是**生产级演示项目**：共享 infra + 2 应用服务一键启动、11 个场景演示合同开箱即演示、155 项单元测试全绿、本体驱动的规则集版本化可回溯、评测契约（B.4）对接标准平台。
+本系统是**生产级演示项目**：共享 infra + 2 应用服务一键启动、11 个场景演示合同开箱即演示、392 项单元测试全绿、本体驱动的规则集版本化可回溯、评测契约（B.4）对接标准平台。
 
 ---
 
@@ -29,7 +29,8 @@
 - [八、目录结构](#八目录结构)
 - [九、测试与验收](#九测试与验收)
 - [十、开发指南](#十开发指南)
-- [十一、常见问题](#十一常见问题)
+- [十一、运维与故障恢复](#十一运维与故障恢复)
+- [十二、常见问题](#十二常见问题)
 
 ---
 
@@ -51,7 +52,7 @@
 | **人工审核闭环** | LangGraph 官方 human-in-the-loop，人工确认结果决定任务终态 | 结论可追责 |
 | **报告导出** | PDF / Excel 中文报告（抽取摘要 + 校验明细 + 违规 + 证据） | 审计取证 |
 
-> 定位：单用户内网部署，合同数据仅本地处理，**不发送第三方解析服务**（拒绝 MinerU 等外部 API），可直接用于合同入库前审查、历史合同巡检、演示与评估。
+> 定位：单用户内网部署。**文档解析完全本地**（拒绝 MinerU 等外部解析 API），但抽取与语义校验的合同内容会外发 DeepSeek（详见「对数据安全」的数据出域边界），部署前请确认合规。
 
 ---
 
@@ -68,6 +69,7 @@
 
 ### 对数据安全
 - **本地解析**：PDF / Word / 扫描件全部本地处理（PyMuPDF / python-docx / PaddleOCR），不依赖任何外部解析 API；
+- **数据出域边界（如实告知）**：抽取与语义校验的合同内容**会发送至 DeepSeek（外部 LLM API）**——这是唯一对外通道，绝无其他第三方；可配置内部端点（`DEEPSEEK_BASE_URL`），服务启动时自动检测端点并对外网地址打 WARN 告警；
 - **幂等去重**：sha256 唯一哈希，重复上传自动去重，孤儿文件与 checkpoint 定期清理。
 
 ### 对评测 / 集成方
@@ -105,7 +107,10 @@
 `rule_check_result` + `violation` **单事务写入**、`(task_id, rule_id)` 唯一键先删后插，崩溃后 resume 不重复落库；B.4 加固：死锁（MySQL 1213 / 40001）**整事务重试**，`token_usage_json` 旧库幂等补列迁移。
 
 ### 9. 数据安全
-合同文件与解析仅在**本地磁盘 + MySQL**，不发送任何第三方解析服务（含 MinerU 等外部 API）；sha256 去重、孤儿文件 / checkpoint 定期清理、启动恢复未完成任务。
+- **解析本地化**：合同原件、解析结果（文本 / OCR）仅在**本地磁盘 + MySQL**，不发送任何第三方解析服务（含 MinerU 等外部 API）；
+- **LLM 外发（数据出域）**：抽取与语义校验阶段，合同文本内容发送至 `DEEPSEEK_BASE_URL` 指向的 LLM API（默认 DeepSeek 公有云）——本系统唯一的对外数据通道。服务启动时自动检测端点，外部端点打 WARN 日志提醒合规；部署内网 + 敏感合同时建议接入自建 / 内网 LLM 端点；
+- **密钥管理**：DeepSeek API key / 认证口令全部经 env 注入（`backend/.env` → 容器 `env_file`，**不入镜像 / 仓库**，`.env` 已被 `.gitignore` 排除），日志不打印密钥；
+- 幂等去重、孤儿文件 / checkpoint 定期清理、启动恢复未完成任务。
 
 ### 10. 评测契约（B.4）
 - `GET /api/contracts`：标准契约清单端点（agent / interfaces / scenes），平台脚手架自动发现，`llm=false` 辅助接口（上传）只登记不进 agent 接口；
@@ -181,7 +186,7 @@ graph TB
 | 解析 | PyMuPDF（PDF）、python-docx（Word）、PaddleOCR 3.x（扫描件，置信度阈值 + 失败降级） |
 | 前端 | Vue3 + Vite + Element Plus + axios（轮询任务状态） |
 | 报告 | reportlab（PDF，中文字体 bundle）+ openpyxl（Excel） |
-| 测试 | unittest（backend，155 项全绿） |
+| 测试 | unittest（backend，392 项全绿） |
 
 ---
 
@@ -282,7 +287,7 @@ contract-check/
 │   │   └── common/ db/       # 常量 / DB session 与 models
 │   ├── rules/manual/         # 人工规则：3 条 SPARQL（缺甲方/缺乙方/终止早于生效）
 │   │                          #           + 4 条语义 JSON（缺违约条款/权利义务不对等/技术标准/单方签署）
-│   ├── tests/                # 155 项单元测试
+│   ├── tests/                # 392 项单元测试
 │   ├── scripts/              # 验收/冒烟/PDF 生成脚本
 │   ├── requirements*.txt / Dockerfile / entrypoint.sh / fonts/
 ├── frontend/                 # 前端（Vue3 + Vite + Element Plus）
@@ -306,7 +311,7 @@ contract-check/
 
 ## 九、测试与验收
 
-### 单元测试（155 项全绿）
+### 单元测试（392 项全绿）
 
 ```bash
 cd backend
@@ -354,7 +359,7 @@ npm run dev                                # Vite 开发服务器，/api 已反�
 
 - 单测：`cd backend && .venv/Scripts/python.exe -m unittest discover -s tests -p "test_*.py"`；
 - 评测契约：宿主直连容器后端 `verify_cc_e2e.py`（注意 `trust_env=False` 防系统代理撞 502）；
-- 提交前跑全量单测，确保不破坏既有 155 项。
+- 提交前跑全量单测，确保不破坏既有测试。
 
 ### 新增规则
 
@@ -374,7 +379,50 @@ npm run dev                                # Vite 开发服务器，/api 已反�
 
 ---
 
-## 十一、常见问题
+## 十一、运维与故障恢复（单用户内网最小运维集）
+
+定位：单用户内网真实使用，运维只覆盖「数据不丢、能恢复、不被拖垮」三件事，不引入监控 / 告警 / 多实例。
+
+### 每日备份（必做）
+
+- 脚本：`backend/scripts/backup_mysql.sh`（Linux / Git Bash）与 `backend/scripts/backup_mysql.ps1`（Windows）；
+- 产物：`data/backups/contract_check_YYYYmmdd_HHMMSS.sql.gz`，自动保留最近 **14** 份（`KEEP` 可调）；
+- 凭证：自动读共享 infra 的 `infra/.env`（`MYSQL_CONTRACT_USER / MYSQL_CONTRACT_PASSWORD`），仓库不存凭据；
+- 定时：Windows 任务计划程序 / crontab 每日跑一次；gzip 在容器内完成，宿主机无需安装；
+- 已验证：手动跑通，10 张业务表 + 数据可完整还原到临时库。
+
+### 恢复
+
+```bash
+# 1. 停 backend（避免写库竞争）
+docker compose stop backend
+# 2. 覆盖还原到 contract_check（建议先备份当前库）
+gzip -dc data/backups/contract_check_XXX.sql.gz | docker exec -i shared-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" contract_check'
+# 3. 重启
+docker compose up -d
+```
+
+> 注意：`contract` 账号仅有 `contract_check` 库权限，覆盖还原需用 infra root（`infra/.env` 的 `MYSQL_ROOT_PASSWORD`）。
+
+### 任务并发限制
+
+- 配置：`MAX_CONCURRENT_TASKS`（默认 **3**）——同时运行的校验流水线数上限，防连传大量合同 → 数十条 LLM 流水线并发；
+- 行为：超限任务排队等待空位、不拒绝；人工审核 resume 是同步短跑，不受此限。
+
+### 崩溃恢复成本
+
+- 进程崩溃 / 重启后，`PENDING / PARSING / EXTRACTING / VALIDATING` 任务自动续跑——同 LangGraph thread_id 从最后 checkpoint 继续，**非从图起点重跑**；
+- 抽取 / 语义节点带**崩溃重放守卫**（T4.3-5）：结果先落库快照，重放读快照复用、**不再调 LLM**（防重复计费，见 `tests/test_llm_reuse.py`）；
+- 结论：崩溃恢复几乎不产生额外 LLM 成本，仅重跑 parse 等本地廉价节点。
+
+### 健康检查与日志
+
+- 探针：`curl http://127.0.0.1:8003/api/health` 返回 `{"status":"ok","auth_required":true}`（容器内 `:8000`）；
+- 日志：`docker compose logs -f backend`；启动时可见鉴权缺失 / LLM 外发 WARN（见「对数据安全」）。
+
+---
+
+## 十二、常见问题
 
 | 现象 | 处理 |
 |------|------|

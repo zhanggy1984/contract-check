@@ -3,13 +3,16 @@ import logging
 import os
 import time
 import uuid
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api import contracts, files, rules, tasks, violations
+from app.api import auth, contracts, files, rules, tasks, violations
+from app.common.security import require_auth
 from app.common.trace import install, trace_id_var
+from app.config import settings
 from app.db import models
 from app.db.session import engine
 from app.ontology.loader import ensure_loaded
@@ -27,10 +30,12 @@ logging.basicConfig(
 install()
 
 app = FastAPI(title="合同校验系统", version="0.1.0")
-app.include_router(files.router, prefix="/api")
-app.include_router(tasks.router, prefix="/api")
-app.include_router(violations.router, prefix="/api")
-app.include_router(rules.router, prefix="/api")
+# 受保护路由挂 require_auth；豁免：health（健康探针）、contracts（B.4 平台自动发现）、auth/login（登录入口）
+app.include_router(files.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(tasks.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(violations.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(rules.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(auth.router, prefix="/api")
 app.include_router(contracts.router, prefix="/api")
 
 
@@ -73,6 +78,37 @@ async def log_requests(request: Request, call_next):
     logger.debug("RESP %s %s -> %d (%dms)", request.method, request.url.path,
                  response.status_code, dt)
     return response
+
+
+def _warn_auth_and_llm() -> None:
+    """启动告警：认证配置缺失（fail-closed 提醒）+ LLM 端点外发提醒（数据出域告知）。
+
+    LLM 判定为外部端点（非 localhost/回环/内网段）时告警，提醒合同内容将外发——
+    系统定位"本地处理"仅指解析，抽取/语义校验依赖外部 LLM 必须让使用方知情。
+    """
+    if settings.auth_enabled:
+        if not settings.jwt_secret or not settings.auth_password:
+            logger.warning("鉴权已开启但未配置 AUTH_PASSWORD / JWT_SECRET——登录与受保护接口将 503 拒绝，请补齐 env")
+    else:
+        logger.warning("鉴权已关闭（AUTH_ENABLED=false）——仅评测/本地开发用，生产务必开启")
+    if _is_external_llm(settings.deepseek_base_url):
+        logger.warning("LLM 端点 %s 为外部服务：合同抽取/语义校验内容将外发，请确认数据出域合规",
+                       settings.deepseek_base_url)
+
+
+def _is_external_llm(url: str) -> bool:
+    """LLM 端点是否外部：非回环/非内网段视为外部（DeepSeek 官方域名即外部）。"""
+    host = (urlparse(url).hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "::1") or host.startswith("127."):
+        return False
+    if host.startswith("10.") or host.startswith("192.168."):
+        return False
+    if host.startswith("172."):
+        try:
+            return not (16 <= int(host.split(".")[1]) <= 31)
+        except (IndexError, ValueError):
+            return True
+    return True
 
 
 def _ensure_column(engine, table: str, column: str, ddl_type: str) -> None:
@@ -118,6 +154,9 @@ def _ensure_unique_index(engine, table: str, column: str) -> None:
 
 @app.on_event("startup")
 def startup() -> None:
+    # 鉴权 fail-closed：开了鉴权却没配密钥 → 显式告警（require_auth/login 会 503 拒绝，
+    # 不静默放行）。LLM 端点外部化也在此告警（见下方 _warn_auth_and_llm）。
+    _warn_auth_and_llm()
     models.Base.metadata.create_all(bind=engine)
     _ensure_column(engine, "check_task", "token_usage_json", "LONGTEXT")
     _ensure_column(engine, "check_task", "decision_json", "LONGTEXT")
@@ -134,4 +173,5 @@ def startup() -> None:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    # auth_required 供前端决定是否展示登录页（鉴权关闭的评测/开发模式跳过登录）
+    return {"status": "ok", "auth_required": settings.auth_enabled}

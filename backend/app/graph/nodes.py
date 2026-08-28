@@ -333,9 +333,13 @@ def validate_semantic(state: TaskState) -> dict:
         # 崩溃重放守卫（T4.3-5 重复计费）：语义结果快照已落库 → 复用跳过 evaluate_semantic。
         # 无规则/无段分支不落库不触发；降级审计第一次运行已写，复用不重复（审计少一条可接受）
         if task.sem_outcomes_json:
+            # 崩溃重放：从快照恢复时重算降级标记——首跑若在「快照后→checkpoint 前」窗口
+            # 崩溃，降级标记未随 checkpoint 落盘，这里必须补算，否则又静默自动 SUCCESS
+            replayed = json.loads(task.sem_outcomes_json)
             return {
-                "sem_outcomes": json.loads(task.sem_outcomes_json),
+                "sem_outcomes": replayed,
                 "sem_usage": json.loads(task.sem_usage_json) if task.sem_usage_json else None,
+                "sem_degraded": _is_sem_degraded(replayed),
             }
 
     if not rules:
@@ -363,15 +367,16 @@ def validate_semantic(state: TaskState) -> dict:
             task.sem_outcomes_json = json.dumps(outcomes, ensure_ascii=False)
             task.sem_usage_json = json.dumps(usage, ensure_ascii=False) if usage else None
             db.commit()
-    if _is_sem_degraded(outcomes):
-        # 语义评估整体降级（LLM 不可用/段原文缺失）→ 留决策审计 + 日志；终态仍按无 violation 走
-        # SUCCESS（SKIPPED 非 violation，强行 FAILED 会误报），靠 trace/日志区分"没评估"与"真通过"
+    degraded = _is_sem_degraded(outcomes)
+    if degraded:
+        # 语义评估整体降级（LLM 不可用/段原文缺失）→ 留决策审计 + 日志；不强行 FAILED（SKIPPED 非
+        # violation，强行 FAILED 会误报），靠 sem_degraded 标记让 _should_wait 转人工确认而非自动通过
         _persist_decisions(task_id, [make_trace(
             "validate_semantic", "sem_degraded", "degrade", "fallback_error",
             f"语义评估整体降级：全部 {len(outcomes)} 条规则 SKIPPED/LOW，任务无 violation 但评估不完整",
             {"sem_rules": len(outcomes)})])
         logger.warning("任务 %s 语义评估整体降级（%d 条规则全 SKIPPED/LOW）", task_id, len(outcomes))
-    return {"sem_outcomes": outcomes, "sem_usage": usage}   # 评测契约 usage（B.4），persist 统一落库
+    return {"sem_outcomes": outcomes, "sem_usage": usage, "sem_degraded": degraded}   # 评测契约 usage（B.4），persist 统一落库
 
 
 def persist_node(state: TaskState) -> dict:

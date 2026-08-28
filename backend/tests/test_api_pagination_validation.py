@@ -8,7 +8,12 @@
 TestClient 非 with 模式不发 lifespan（不触发 startup 连 MySQL），get_db 用 stub 覆盖；
 confirm_user / _sanitize_filename 走纯单测不依赖 app。unittest 风格，pytest 作 runner。
 """
+import os
 import unittest
+
+# 全局测试默认关鉴权：Settings 是 import 时单例，本文件按字母序首个导入 app.config，
+# 在此设 env 使整套测试的 Settings 以 auth_enabled=False 初始化（test_auth.py 按需改回）
+os.environ.setdefault("AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError

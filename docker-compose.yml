@@ -25,6 +25,13 @@ services:
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       TASK_TIMEOUT_SECONDS: "1800"      # 首次 OCR 模型下载预留，避免误超时
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-3}   # 同时运行流水线上限，防连传 N 合同 → N 条 LLM 并发
+      # 认证（单用户 JWT 登录）：生产必须设置 AUTH_PASSWORD / JWT_SECRET（根 .env），
+      # 留空则登录与受保护接口 503 fail-closed（启动有 WARN），评测/开发可 AUTH_ENABLED=false
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:-}
     ports:
       - "8003:8000"                     # 避本地 rag-attu(8001)/gq-backend(8080)
     volumes:
