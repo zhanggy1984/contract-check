@@ -2,39 +2,31 @@
 
 > **本体驱动 + 大模型抽取 + 混合校验 + 人工审核闭环**的合同智能审查系统：上传合同（PDF / Word / 扫描件），自动抽取为结构化标准数据，按本体定义的规则做确定性 + 语义双重校验，全量落库并进入人工审核闭环，最终输出校验报告。
 
-本系统是**生产级演示项目**：共享 infra + 2 应用服务一键启动、11 个场景演示合同开箱即演示、392 项单元测试全绿、本体驱动的规则集版本化可回溯、评测契约（B.4）对接标准平台。
+第一次接触这个项目，只看下面三句就够了：
 
----
-
-> ## ⚠️ 前置依赖：共享 infra
->
-> 本 agent **不自带任何中间件**，运行前须先部署共享 infra（MySQL 等）。
->
-> ```bash
-> # 发布物：clone infra 独立仓库后启动
-> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
-> # 本地开发：infra 位于 ../infra
-> cd ../infra && docker compose up -d
-> ```
+- **做什么**：把合同原文变成"可复核、可追溯、有依据"的审查结论。上传合同 → 自动抽取结构化数据 → 本体规则 + 大模型双重校验 → 人工审核闭环 → 输出 PDF/Excel 报告，全程留痕可审计。
+- **怎么做**：**本体单一事实源**驱动抽取 Schema 与校验规则（换本体即换 schema + 规则集）→ **混合校验**（SPARQL 确定性抓字段级 + LLM 语义带原文证据抓条款级）→ **LangGraph 官方 HITL** 人工确认决定终态；文档解析全本地（拒绝外部解析 API），合同内容仅外发 DeepSeek（唯一对外通道）。
+- **好在哪**：结论有据可查（语义证据强制原文精确子串）、判定口径可复现（规则版本化可回溯）、人工确认决定终态（不误判不裸判）、393 项单元测试全绿 + B.4 评测契约对接标准平台，生产级一键部署。
 
 ## 目录
 
-- [一、项目简介：解决什么痛点](#一项目简介解决什么痛点)
-- [二、业务价值：给谁带来什么](#二业务价值给谁带来什么)
-- [三、技术闪光点](#三技术闪光点)
-- [四、系统架构](#四系统架构)
-- [五、技术栈一览](#五技术栈一览)
-- [六、快速开始（3 步跑起来）](#六快速开始3-步跑起来)
-- [七、演示场景与合同库](#七演示场景与合同库)
+- [一、这是什么](#一这是什么)
+- [二、系统架构](#二系统架构)
+- [三、快速开始](#三快速开始)
+- [四、使用场景与示例](#四使用场景与示例)
+- [五、技术闪光点](#五技术闪光点)
+- [六、技术栈一览](#六技术栈一览)
+- [七、配置说明](#七配置说明)
 - [八、目录结构](#八目录结构)
 - [九、测试与验收](#九测试与验收)
 - [十、开发指南](#十开发指南)
 - [十一、运维与故障恢复](#十一运维与故障恢复)
-- [十二、常见问题](#十二常见问题)
+- [十二、已知限制与优化方向](#十二已知限制与优化方向)
+- [十三、版本记录](#十三版本记录)
 
 ---
 
-## 一、项目简介：解决什么痛点
+## 一、这是什么
 
 合同审查是**高频、重复且容错要求高**的业务：
 
@@ -52,107 +44,43 @@
 | **人工审核闭环** | LangGraph 官方 human-in-the-loop，人工确认结果决定任务终态 | 结论可追责 |
 | **报告导出** | PDF / Excel 中文报告（抽取摘要 + 校验明细 + 违规 + 证据） | 审计取证 |
 
-> 定位：单用户内网部署。**文档解析完全本地**（拒绝 MinerU 等外部解析 API），但抽取与语义校验的合同内容会外发 DeepSeek（详见「对数据安全」的数据出域边界），部署前请确认合规。
+> **一句话理解本系统**：合同校验 = 先把合同原文交给大模型抽成结构化数据（当事人、金额、日期、条款），再用"本体定义好的规则"逐条核对——能精确比对字段的走 SPARQL 确定性规则，需要理解语义的（如"权利义务是否对等"）走 LLM 语义规则并强制带原文证据，拿不准的进人工审核，最终由人确认结论。这样每个结论都有规则依据 + 原文证据 + 人工签字，可追溯、可审计。
+
+> ⚠️ 定位：单用户内网部署。**文档解析完全本地**（拒绝 MinerU 等外部解析 API），但抽取与语义校验的合同内容会外发 DeepSeek（详见「数据安全」的出域边界），部署前请确认合规。
 
 ---
 
-## 二、业务价值：给谁带来什么
+## 二、系统架构
 
-### 对法务 / 合同管理人员
-- **提效**：DeepSeek 把合同抽取为标准 JSON + RDF，规则自动预检，法务从"逐条翻阅"变为"复核确认 + 修正"；
-- **规则统一**：确定性规则由本体自动生成（不手写 SPARQL），语义规则大白话命名，判定口径可复现、可版本回溯；
-- **闭环留痕**：每条校验结果全量落库（含成功），异常进入人工审核，**人工确认决定终态**，结论有据可查。
-
-### 对合规 / 审计
-- **可追溯**：抽取 JSON、RDF 实例、校验明细、证据原文、人工决策全链路可查，支持 PDF / Excel 报告导出；
-- **防编造**：语义证据强制为原文**精确子串**（机制级防御），不可信结果自动标 low-confidence 提示复核。
-
-### 对数据安全
-- **本地解析**：PDF / Word / 扫描件全部本地处理（PyMuPDF / python-docx / PaddleOCR），不依赖任何外部解析 API；
-- **数据出域边界（如实告知）**：抽取与语义校验的合同内容**会发送至 DeepSeek（外部 LLM API）**——这是唯一对外通道，绝无其他第三方；可配置内部端点（`DEEPSEEK_BASE_URL`），服务启动时自动检测端点并对外网地址打 WARN 告警；
-- **幂等去重**：sha256 唯一哈希，重复上传自动去重，孤儿文件与 checkpoint 定期清理。
-
-### 对评测 / 集成方
-- **标准契约**：`GET /api/contracts` 声明 agent 接口与场景清单（B.4），平台脚手架可**自动发现**；
-- **结果契约**：`GET /api/tasks/{id}/result` 同步 JSON 透出 `answer / usage / timing / tool_calls / meta`，直接对接标准评测取数。
-
----
-
-## 三、技术闪光点
-
-### 1. 本体单一事实源
-一份 OWL 合同本体（Contract / Party / Item / Clause，30+ 类、30+ 属性）同时驱动「抽取 JSON Schema」（`schema_mapper`）与「校验 SPARQL 规则」（`rule_generator`）——**换本体即换 schema + 规则集**，本体版本 md5 落库可回溯。
-
-### 2. 混合校验：确定性 + 语义双层
-- **确定性**：SPARQL 闭合世界找反例，多反例**合并单条 violation**（message 列出全部 `?s`）；
-- **语义**：LLM 按段批跑，`aggregation=any/all` 粒度聚合，条款级问题带原文证据；
-- PASS / FAIL / SKIPPED **全量落库（含成功）**，抽取不完整时确定性降级 SKIPPED、语义照跑（基于原文不受缺失影响）。
-
-### 3. 官方 HITL 落地
-`await_human_review` 为**纯节点**（无副作用，resume 重跑安全）；resume 用 **CAS 抢占**（`WAITING_REVIEW→REVIEWING`，rowcount=1 才放行，并发返回 409），invoke 失败幂等回退，前端按钮防重。`langgraph-checkpoint-mysql` 持久化图状态（`thread_id=task-{id}`），进程重启可恢复。
-
-### 4. 终态语义正确
-存在人工确认（CONFIRMED）的异常 → **FAILED**；全误报或零异常 → **SUCCESS**——人工审核结果真正决定任务结论，杜绝"确认了异常却显示通过"。
-
-### 5. 证据防御
-语义规则 evidence 必须为原文**精确子串**（NFKC 归一化 + 去空白，容忍 OCR 断字），不满足则带反馈重试，仍不满足标 **low-confidence**——从机制上防止 LLM 编造证据。
-
-### 6. 取消 / 超时语义
-取消白名单前后端一致；运行中任务靠节点入口 CANCELLED 短路（`TaskCancelledError`）**确定置 CANCELLED**；软超时兜底不阻塞事件循环，任一节点异常/超时 → FAILED 兜底。
-
-### 7. 抽取健壮性
-必填空串视为缺失触发 LLM 重试（防止"空串被当有值、RDF 却缺失"的语义缝隙）；输出截断自动降级分段重抽（B.4：`LengthFinishReasonError` 恢复 `content/finish_reason/usage`）；同名当事人合并、跨段字段冲突标低置信进人工。
-
-### 8. 一致性与幂等
-`rule_check_result` + `violation` **单事务写入**、`(task_id, rule_id)` 唯一键先删后插，崩溃后 resume 不重复落库；B.4 加固：死锁（MySQL 1213 / 40001）**整事务重试**，`token_usage_json` 旧库幂等补列迁移。
-
-### 9. 数据安全
-- **解析本地化**：合同原件、解析结果（文本 / OCR）仅在**本地磁盘 + MySQL**，不发送任何第三方解析服务（含 MinerU 等外部 API）；
-- **LLM 外发（数据出域）**：抽取与语义校验阶段，合同文本内容发送至 `DEEPSEEK_BASE_URL` 指向的 LLM API（默认 DeepSeek 公有云）——本系统唯一的对外数据通道。服务启动时自动检测端点，外部端点打 WARN 日志提醒合规；部署内网 + 敏感合同时建议接入自建 / 内网 LLM 端点；
-- **密钥管理**：DeepSeek API key / 认证口令全部经 env 注入（`backend/.env` → 容器 `env_file`，**不入镜像 / 仓库**，`.env` 已被 `.gitignore` 排除），日志不打印密钥；
-- 幂等去重、孤儿文件 / checkpoint 定期清理、启动恢复未完成任务。
-
-### 10. 评测契约（B.4）
-- `GET /api/contracts`：标准契约清单端点（agent / interfaces / scenes），平台脚手架自动发现，`llm=false` 辅助接口（上传）只登记不进 agent 接口；
-- `GET /api/tasks/{id}/result`：同步 JSON 契约，透出 `answer`（校验摘要，失败/取消也有语义补全）、`usage`（LLM token 全字段聚合）、`timing`（start/end，同步接口不测首字）、`tool_calls`（规则命中明细全量，含 PASS / SKIPPED）、`meta`（agent/model/interface/contract_version）；
-- 配套 `verify_cc_*` 评测脚本与 `gen_cc_*` 变体合同生成器，覆盖单方签署缺陷形态、合法签署边界、电子签章等场景。
-
----
-
-## 四、系统架构
-
-### 系统拓扑（docker compose 一键部署，3 容器）
+### 系统拓扑（2 应用容器 + 共享 infra）
 
 ```mermaid
 graph TB
-    subgraph 前端
-        FE["frontend (Vue3 + nginx :80)<br/>Vite 构建 + /api 反代 → api-gateway"]
+    subgraph "客户端入口"
+        FE["frontend（Vue3 + nginx :80）<br/>Vite 构建 + /api 反代 → api-gateway"]
+        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID + 限流"]
     end
-    subgraph 共享网关
-        GATEWAY["API 网关 api-gateway:8099（共享 infra）<br/>Host 虚拟域名路由 + X-Request-ID traceId<br/>按真实 IP 限流"]
+    subgraph "backend 四层架构（逻辑分域 · 单进程）"
+        L1["交互层 app/api/*<br/>路由 · 鉴权 · 请求解析 · 结果格式化"]
+        L2["控制层 app/service + app/graph<br/>任务编排 · 状态管理 · LangGraph HITL"]
+        L3["能力层 app/tools + parser + ocr + validation + report<br/>registry/executors · 解析 · OCR · 校验 · 报告"]
+        L4["资源层 app/db + ontology + llm + decision_recorder<br/>ORM/序列化 · 本体 · LLM 客户端 · 审计"]
     end
-    subgraph 应用层
-        API["backend (FastAPI :8000)<br/>REST API + LangGraph 流水线 + HITL<br/>本体 / SPARQL 校验 / 报告 / 落库<br/>文档解析 · startup 建表/本体加载/恢复任务"]
-    end
-    subgraph "AI 服务"
-        EX["LLM 抽取<br/>本体驱动 schema · json_mode · 分段重抽"]
-        SE["语义校验<br/>按段批跑 · 原文证据 · 置信度"]
-        OC["OCR<br/>PaddleOCR 扫描件识别"]
-        DS["DeepSeek<br/>外部 LLM API"]
-    end
-    subgraph 数据层
+    subgraph "外部依赖"
+        DS["DeepSeek LLM<br/>抽取 · 语义校验"]
         MYSQL[(MySQL 8<br/>业务表 + checkpoint + token_usage)]
     end
 
     FE --> GATEWAY
-    GATEWAY --> API
-    API --> MYSQL
-    API --> EX
-    API --> SE
-    API --> OC
-    EX --> DS
-    SE --> DS
+    GATEWAY --> L1
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+    L4 --> MYSQL
+    L4 --> DS
 ```
+
+> 箭头即**调用方向**：客户端请求经 nginx → 网关 → 交互层，**单向逐层下钻**（交互 → 控制 → 能力 → 资源），结果自下而上返回；DeepSeek / MySQL 等外部依赖仅由资源层访问。分层细节与依赖规则见下文「四层逻辑分层」。
 
 **对外链路（统一 API 网关）**：浏览器只访问前端 nginx；nginx 将 `/api` 反代到共享网关 `api-gateway:8099`（`Host: cc.local`），网关按 Host 虚拟域名路由到本 agent 后端，并生成 `X-Request-ID`（后端日志 `trace_id` 即此值）、按真实 IP 限流。网关由共享 infra 仓库提供（`infra/api-gateway/`），未知 Host 一律 403 防串线。宿主端口映射的 backend 地址（如 `localhost:8003`）仅供开发调试 / 评测直连，绕过网关。
 
@@ -175,7 +103,7 @@ graph TB
 
 ### 四层逻辑分层（交互 → 控制 → 能力 → 资源）
 
-代码按职责分四层，依赖单向向下：上层可依赖下层，下层绝不反向依赖上层；**交互层只经控制层访问能力/资源**。
+代码按职责分四层，依赖**单向向下**：上层可依赖下层，下层绝不反向依赖上层；**交互层只经控制层访问能力/资源**。
 
 | 层 | 职责 | 落点 |
 |---|---|---|
@@ -205,25 +133,18 @@ graph TB
 
 ---
 
-## 五、技术栈一览
+## 三、快速开始
 
-| 域 | 选型 |
-|----|------|
-| 编排 | LangGraph（官方 human-in-the-loop）+ langgraph-checkpoint-mysql（锁版本） |
-| 后端 | Python 3.11 + FastAPI + SQLAlchemy 2.0 + PyMySQL |
-| LLM | DeepSeek（langchain-openai，json_mode，max_tokens 8192，429 退避，截断恢复） |
-| 本体 | owlready2（OWL/RDF，版本 md5 落库）+ rdflib 执行 SPARQL（版本显式钉死） |
-| 解析 | PyMuPDF（PDF）、python-docx（Word）、PaddleOCR 3.x（扫描件，置信度阈值 + 失败降级） |
-| 前端 | Vue3 + Vite + Element Plus + axios（轮询任务状态） |
-| 报告 | reportlab（PDF，中文字体 bundle）+ openpyxl（Excel） |
-| 测试 | unittest（backend，392 项全绿） |
+> ⚠️ **前置依赖：共享 infra**。本 agent **不自带任何中间件**（仅依赖共享 infra 的 MySQL），运行前须先部署共享 infra 仓库：
+>
+> ```bash
+> # 发布物：clone infra 独立仓库后启动
+> git clone https://github.com/zhanggy1984/share-infra && cd infra && docker compose up -d
+> # 本地开发：infra 位于 ../infra
+> cd ../infra && docker compose up -d
+> ```
 
----
-
-## 六、快速开始（3 步跑起来）
-
-> 前置：Docker Desktop（Linux 容器）。
-> **共享 infra**：本 agent 不自带任何中间件（仅依赖共享 infra 的 MySQL）。启动前先部署 infra（见 infra 仓库 README：`docker compose up -d`）。
+前置：Docker Desktop（Linux 容器）。
 
 ### 第 1 步：配置环境变量
 
@@ -266,7 +187,29 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 
 ---
 
-## 七、演示场景与合同库
+## 四、使用场景与示例
+
+### 4.1 给谁带来什么
+
+**对法务 / 合同管理人员**
+- **提效**：DeepSeek 把合同抽取为标准 JSON + RDF，规则自动预检，法务从"逐条翻阅"变为"复核确认 + 修正"；
+- **规则统一**：确定性规则由本体自动生成（不手写 SPARQL），语义规则大白话命名，判定口径可复现、可版本回溯；
+- **闭环留痕**：每条校验结果全量落库（含成功），异常进入人工审核，**人工确认决定终态**，结论有据可查。
+
+**对合规 / 审计**
+- **可追溯**：抽取 JSON、RDF 实例、校验明细、证据原文、人工决策全链路可查，支持 PDF / Excel 报告导出；
+- **防编造**：语义证据强制为原文**精确子串**（机制级防御），不可信结果自动标 low-confidence 提示复核。
+
+**对数据安全**
+- **本地解析**：PDF / Word / 扫描件全部本地处理（PyMuPDF / python-docx / PaddleOCR），不依赖任何外部解析 API；
+- **数据出域边界（如实告知）**：抽取与语义校验的合同内容**会发送至 DeepSeek（外部 LLM API）**——这是唯一对外通道，绝无其他第三方；可配置内部端点（`DEEPSEEK_BASE_URL`），服务启动时自动检测端点并对外网地址打 WARN 告警；
+- **幂等去重**：sha256 唯一哈希，重复上传自动去重，孤儿文件与 checkpoint 定期清理。
+
+**对评测 / 集成方**
+- **标准契约**：`GET /api/contracts` 声明 agent 接口与场景清单（B.4），平台脚手架可**自动发现**；
+- **结果契约**：`GET /api/tasks/{id}/result` 同步 JSON 透出 `answer / usage / timing / tool_calls / meta`，直接对接标准评测取数。
+
+### 4.2 演示场景与合同库
 
 `data/gen_demo_contracts.py` 一键生成 11 个场景演示合同到 `data/test-contracts/`（PDF 体积大不入库，clone 后先运行生成脚本）。上传对应合同即可触发对应校验结果：
 
@@ -286,7 +229,9 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 
 **演示建议**：先传 `good.pdf` 展示全流程走通；再传 `b1/b2/b6/b7` 展示异常进入人工审核闭环与置信度标注；`scanned.pdf` 展示 OCR 能力；`long_contract.pdf` 展示分段抽取与冲突低置信。
 
-**单方签署专项变体**（7.8 薄弱点验证，`gen_cc_*.py` 生成 + `verify_cc_*.py` 验证）：
+### 4.3 单方签署专项变体
+
+单方签署边界（7.8 薄弱点）专项验证，`gen_cc_*.py` 生成 + `verify_cc_*.py` 验证：
 
 | 脚本 | 验证点 | 结果期望 |
 |------|--------|---------|
@@ -297,6 +242,88 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 
 ---
 
+## 五、技术闪光点
+
+### 1. 本体单一事实源
+一份 OWL 合同本体（Contract / Party / Item / Clause，30+ 类、30+ 属性）同时驱动「抽取 JSON Schema」（`schema_mapper`）与「校验 SPARQL 规则」（`rule_generator`）——**换本体即换 schema + 规则集**，本体版本 md5 落库可回溯。
+
+### 2. 混合校验：确定性 + 语义双层
+- **确定性**：SPARQL 闭合世界找反例，多反例**合并单条 violation**（message 列出全部 `?s`）；
+- **语义**：LLM 按段批跑，`aggregation=any/all` 粒度聚合，条款级问题带原文证据；
+- PASS / FAIL / SKIPPED **全量落库（含成功）**，抽取不完整时确定性降级 SKIPPED、语义照跑（基于原文不受缺失影响）。
+
+### 3. 官方 HITL 落地
+`await_human_review` 为**纯节点**（无副作用，resume 重跑安全）；resume 用 **CAS 抢占**（`WAITING_REVIEW→REVIEWING`，rowcount=1 才放行，并发返回 409），invoke 失败幂等回退，前端按钮防重。`langgraph-checkpoint-mysql` 持久化图状态（`thread_id=task-{id}`），进程重启可恢复。
+
+### 4. 终态语义正确
+存在人工确认（CONFIRMED）的异常 → **FAILED**；全误报或零异常 → **SUCCESS**——人工审核结果真正决定任务结论，杜绝"确认了异常却显示通过"。
+
+### 5. 证据防御
+语义规则 evidence 必须为原文**精确子串**（NFKC 归一化 + 去空白，容忍 OCR 断字），不满足则带反馈重试，仍不满足标 **low-confidence**——从机制上防止 LLM 编造证据。
+
+### 6. 取消 / 超时语义
+取消白名单前后端一致；运行中任务靠节点入口 CANCELLED 短路（`TaskCancelledError`）**确定置 CANCELLED**；软超时兜底不阻塞事件循环，任一节点异常/超时 → FAILED 兜底。
+
+### 7. 抽取健壮性
+必填空串视为缺失触发 LLM 重试（防止"空串被当有值、RDF 却缺失"的语义缝隙）；输出截断自动降级分段重抽（B.4：`LengthFinishReasonError` 恢复 `content/finish_reason/usage`）；同名当事人合并、跨段字段冲突标低置信进人工。
+
+### 8. 一致性与幂等
+`rule_check_result` + `violation` **单事务写入**、`(task_id, rule_id)` 唯一键先删后插，崩溃后 resume 不重复落库；B.4 加固：死锁（MySQL 1213 / 40001）**整事务重试**，`token_usage_json` 旧库幂等补列迁移。
+
+### 9. 数据安全
+- **解析本地化**：合同原件、解析结果（文本 / OCR）仅在**本地磁盘 + MySQL**，不发送任何第三方解析服务（含 MinerU 等外部 API）；
+- **LLM 外发（数据出域）**：抽取与语义校验阶段，合同文本内容发送至 `DEEPSEEK_BASE_URL` 指向的 LLM API（默认 DeepSeek 公有云）——本系统唯一的对外数据通道。服务启动时自动检测端点，外部端点打 WARN 日志提醒合规；部署内网 + 敏感合同时建议接入自建 / 内网 LLM 端点；
+- **密钥管理**：DeepSeek API key / 认证口令全部经 env 注入（`backend/.env` → 容器 `env_file`，**不入镜像 / 仓库**，`.env` 已被 `.gitignore` 排除），日志不打印密钥；
+- 幂等去重、孤儿文件 / checkpoint 定期清理、启动恢复未完成任务。
+
+### 10. 评测契约（B.4）
+- `GET /api/contracts`：标准契约清单端点（agent / interfaces / scenes），平台脚手架自动发现，`llm=false` 辅助接口（上传）只登记不进 agent 接口；
+- `GET /api/tasks/{id}/result`：同步 JSON 契约，透出 `answer`（校验摘要，失败/取消也有语义补全）、`usage`（LLM token 全字段聚合）、`timing`（start/end，同步接口不测首字）、`tool_calls`（规则命中明细全量，含 PASS / SKIPPED）、`meta`（agent/model/interface/contract_version）；
+- 配套 `verify_cc_*` 评测脚本与 `gen_cc_*` 变体合同生成器，覆盖单方签署缺陷形态、合法签署边界、电子签章等场景。
+
+---
+
+## 六、技术栈一览
+
+| 域 | 选型 |
+|----|------|
+| 编排 | LangGraph（官方 human-in-the-loop）+ langgraph-checkpoint-mysql（锁版本） |
+| 后端 | Python 3.11 + FastAPI + SQLAlchemy 2.0 + PyMySQL |
+| LLM | DeepSeek（langchain-openai，json_mode，max_tokens 8192，429 退避，截断恢复） |
+| 本体 | owlready2（OWL/RDF，版本 md5 落库）+ rdflib 执行 SPARQL（版本显式钉死） |
+| 解析 | PyMuPDF（PDF）、python-docx（Word）、PaddleOCR 3.x（扫描件，置信度阈值 + 失败降级） |
+| 前端 | Vue3 + Vite + Element Plus + axios（轮询任务状态） |
+| 报告 | reportlab（PDF，中文字体 bundle）+ openpyxl（Excel） |
+| 测试 | unittest（backend，393 项全绿） |
+
+---
+
+## 七、配置说明
+
+关键环境变量（`backend/.env` + 项目根 `.env`，完整注释见各 `.env.example`）：
+
+| 配置 | 说明 | 默认值 |
+|------|------|--------|
+| `DEEPSEEK_API_KEY` | DeepSeek API Key（**必填**） | - |
+| `DEEPSEEK_BASE_URL` | LLM 端点；外网地址启动自动 WARN 告警出域，敏感场景改内网/自建 | `https://api.deepseek.com` |
+| `DEEPSEEK_MODEL` | 模型名（切换只改这一项） | `deepseek-chat` |
+| `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | LLM 调用超时秒数 / openai SDK 内置 429/5xx 指数退避次数 | `120` / `3` |
+| `MYSQL_HOST/PORT` | MySQL 连接（容器部署由 compose 注入逻辑主机名 `mysql`；本机 dev 直连用） | `localhost` / `3306` |
+| `MYSQL_DATABASE/USER/PASSWORD` | 共享 infra `contract_check` 库账号 | `contract` / `contract123` |
+| `AUTH_ENABLED` | 是否启用 JWT 登录（评测/本地开发可 `false` 跳过） | `true` |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | 登录账号 / 口令（留空时登录与受保护接口 **503 fail-closed**，不裸奔放行） | `admin` / 无默认 |
+| `JWT_SECRET` | JWT HS256 签名密钥（**须长随机串**；留空 503 fail-closed） | 无默认 |
+| `JWT_EXPIRE_MINUTES` | token 有效期 | `720`（12h） |
+| `MAX_CONCURRENT_TASKS` | 同时运行的校验流水线上限（防连传大量合同 → 数十条 LLM 并发打爆限流）；超限排队不拒绝 | `3` |
+| `MAX_UPLOAD_MB` | 上传文件大小上限 | `50` |
+| `TASK_TIMEOUT_SECONDS` | 图执行软超时（超时标记 FAILED，后台线程继续跑真实结果） | `600` |
+| `UPLOAD_DIR` | 上传文件落盘目录 | `data/uploads` |
+| `TOOL_DECISION_ENABLED` | function calling 决策引擎总开关（false = 回退旧行为） | `true` |
+
+> **模型切换**：改 `.env` 的 `DEEPSEEK_MODEL` → `docker compose up -d --build backend` 重启生效（改端点同样方式）。
+
+---
+
 ## 八、目录结构
 
 ```
@@ -304,21 +331,24 @@ contract-check/
 ├── backend/                  # 后端源码（FastAPI + LangGraph）
 │   ├── app/
 │   │   ├── main.py           # 应用入口（建表 / 补列 / 本体加载 / 恢复任务）
-│   │   ├── api/              # REST 路由（files/tasks/violations/rules/contracts）
+│   │   ├── api/              # 交互层：REST 路由（files/tasks/violations/rules/contracts），只经 service
 │   │   │   └── contracts.py  # B.4 标准契约清单端点（agent/interfaces/scenes）
-│   │   ├── graph/            # LangGraph：build / nodes / state（HITL 流水线）
-│   │   ├── llm/              # llm_client（json_mode/截断恢复）+ extractor（抽取/分段重抽）
-│   │   ├── ontology/         # contract_ontology.ttl + loader / schema_mapper / rule_generator
-│   │   ├── validation/       # sparql_executor / semantic_evaluator / persist（单事务落库）
-│   │   ├── service/          # check_task_service（状态机/恢复/交互层收口）+ rule_service（规则管理）
-│   │   ├── parser/           # PDF / Word 解析
-│   │   ├── ocr/              # PaddleOCR 服务
-│   │   ├── report/           # PDF（reportlab）/ Excel（openpyxl）报告
-│   │   └── common/ db/       # 常量 / DB session、models 与序列化（serializers）
+│   │   ├── service/          # 控制层：check_task_service（状态机/恢复/交互层收口）+ rule_service（规则管理）
+│   │   ├── graph/            # 控制层：LangGraph build / nodes / state（HITL 流水线）+ decisions（决策引擎）
+│   │   ├── tools/            # 能力层：registry（工具注册）+ executors（工具执行，决策/OCR/抽取）
+│   │   ├── parser/           # 能力层：PDF / Word 解析 + text_cleaner 安全清洗
+│   │   ├── ocr/              # 能力层：PaddleOCR 服务
+│   │   ├── validation/       # 能力层：sparql_executor / semantic_evaluator / persist（单事务落库）
+│   │   ├── report/           # 能力层：PDF（reportlab）/ Excel（openpyxl）报告
+│   │   ├── db/               # 资源层：session、models 与序列化（serializers）
+│   │   ├── ontology/         # 资源层：contract_ontology.ttl + loader / schema_mapper / rule_generator
+│   │   ├── llm/              # 资源层：llm_client（json_mode/截断恢复/惰性单例）+ extractor（抽取/分段重抽）
+│   │   ├── decision_recorder/ # 资源层：决策痕迹落库（audit）
+│   │   └── common/ config/   # 常量 / 配置（pydantic-settings）
 │   ├── rules/manual/         # 人工规则：3 条 SPARQL（缺甲方/缺乙方/终止早于生效）
 │   │                          #           + 4 条语义 JSON（缺违约条款/权利义务不对等/技术标准/单方签署）
 │   ├── tests/                # 393 项单元测试
-│   ├── scripts/              # 验收/冒烟/PDF 生成脚本
+│   ├── scripts/              # 验收/冒烟/PDF 生成/备份脚本
 │   ├── requirements*.txt / Dockerfile / entrypoint.sh / fonts/
 ├── frontend/                 # 前端（Vue3 + Vite + Element Plus）
 │   ├── src/views/            # Workbench（上传+任务）/ History（历史+报告）/ Rules（规则管理）
@@ -326,7 +356,7 @@ contract-check/
 ├── data/
 │   ├── gen_demo_contracts.py # 11 个场景演示合同生成器（随仓库发布，PDF 不入库）
 │   └── test-contracts/       # 演示合同 + gen_cc_* 变体生成器 + verify 结果 JSON
-├── docker-compose.yml        # 3 容器编排（mysql+backend+frontend）
+├── docker-compose.yml        # 2 应用容器编排（backend+frontend）
 ├── docker-compose.override.yml  # 本地端口覆盖（8088/8003，用户确认保留，不入库）
 ├── verify_cc_e2e.py          # B.4 评测契约 e2e 验证
 ├── verify_cc_variants.py     # single_party 缺陷形态验证
@@ -336,6 +366,8 @@ contract-check/
 ├── task.md                   # 任务拆分与验收标准（T0-T4 + A-H 端到端）
 └── README.md
 ```
+
+> 四层标注见目录右侧注释（交互层 `api/`、控制层 `service/`+`graph/`、能力层 `tools/parser/ocr/validation/report`、资源层 `db/ontology/llm/decision_recorder`）。新增功能一般改 `api/` + 对应 service；**新增服务须归层并保持依赖单向**（见第二章依赖规则）。
 
 ---
 
@@ -366,6 +398,10 @@ cd backend
 - **F 文件边界**：50MB 上限 / 非支持格式拒绝 / 旧版 .doc 拒绝 / 损坏文件 FAILED / sha256 去重 / 并发隔离
 - **G 报告历史**：PDF / Excel 导出中文正常 / 分页筛选详情
 - **H 安全部署**：.env 不入库 / 纯本地解析 / 一键 compose 启动
+
+### 评测契约（B.4）
+
+宿主直连容器后端跑 `verify_cc_*.py`（注意 `trust_env=False` 防系统代理撞 502），覆盖 `answer / usage / timing / tool_calls` 契约字段与单方签署缺陷形态。
 
 ---
 
@@ -452,19 +488,39 @@ docker compose up -d
 
 ---
 
-## 十二、常见问题
+## 十二、已知限制与优化方向
 
-| 现象 | 处理 |
-|------|------|
-| 前端 80 / 后端 8001 起不来 | 宿主被 rag-nginx / rag-attu 占用 → 用 `docker-compose.override.yml` 改 8088 / 8003（`!override` 整体替换） |
-| MySQL 宿主 3306 冲突 | 被 smart-procurement `sp-mysql` 占用 → compose 已改宿主 3307（容器内 backend 连 `mysql:3306` 不变） |
-| 校验不命中预期规则（如 b3 类型越界 / b4 缺乙方） | 依赖 LLM 如实抽取，LLM 可能做宽松枚举映射/推断乙方存在，多传几次即可（详见 `data/test-contracts/README.md`） |
-| `answer` 为空或评测不达标 | B.4 后 answer 已对 FAILED/CANCELLED/WAITING_REVIEW/非终态做语义补全，确保非空；仍为空查 LLM token 是否写入 `token_usage_json` |
-| OCR 首次很慢 | 首次启动需下载 PaddleOCR 模型（`TASK_TIMEOUT_SECONDS=1800` 已预留），等 backend healthy 后再传扫描件 |
-| DeepSeek 抽取出错 / 429 | 检查 `backend/.env` 的 `DEEPSEEK_API_KEY`；429 已自动退避重试 |
-| 评测脚本连 localhost 502 | 宿主系统代理（Clash 等）会劫持内网请求 → 脚本统一 `trust_env=False` 直连 |
-| 演示合同 PDF 乱码/缺失 | 先运行 `python data/gen_demo_contracts.py`（需中文字体，找不到会明确报错） |
-| 演示数据被污染 | 删除 `data/test-contracts/` 下 PDF 后重跑生成脚本（幂等） |
+**如实说明当前已知的边界问题：**
+
+1. **合同内容外发 DeepSeek（唯一对外通道）**：抽取与语义校验必须调用 LLM，合同文本会发送到 `DEEPSEEK_BASE_URL`。内网 / 敏感合同场景须自建或接入内网 LLM 端点（改 `backend/.env` 后重建容器）；文档解析本身全本地，不出域。
+2. **语义规则边界有误报（已知接受）**：语义校验依赖 LLM 抽取质量，个别边界形态存在已知误报——如**单方签署**规则在"签章栏只有空白下划线占位、无凭证词"的合同上约 1/3 触发 `single_party` 误报（签章栏语义依赖原文措辞）。已接受现状，靠 `WAITING_REVIEW` 人工审核兜底，不误判为通过。
+3. **扫描件 OCR 慢**：PaddleOCR 为 CPU 推理，首次需下载模型（`TASK_TIMEOUT_SECONDS` 已预留），大批量扫描件耗时以分钟计。
+4. **前端轮询而非推送**：前端以固定间隔轮询任务状态，实时性受轮询间隔限制（无 SSE / WebSocket）。单任务体验可接受，但"立即感知终态"有秒级延迟。
+5. **单用户内网定位**：JWT 单账号、无多用户 / 角色权限（法务 / 审计 / 管理员），无租户隔离；四层为**逻辑分域、物理不拆**（backend 单容器，能力层与资源层同进程）。
+6. **单元测试 import 顺序敏感**：个别测试依赖模块加载顺序引导配置（已知，正常按默认顺序运行即可）。
+
+**优化方向（未实施，需评估后再动）：**
+
+- 多用户 + 角色权限模型（当前单用户）；
+- SSE / WebSocket 推送替代轮询（任务终态即时感知）；
+- 物理拆分 AI 服务为独立容器（演进路径：目录归拢 `app/ai/` 或独立服务进程，依赖规则不变）；
+- 语义规则类型扩展 + 误报样本回流（缓解限制 2）；
+- 语义校验降级策略可配置（当前降级 LOW → 强制人工，见上线加固）。
+
+---
+
+## 十三、版本记录
+
+| 版本 | 日期 | 核心内容 |
+|------|------|----------|
+| **2.3.2** | 2026-08-28 | 四层逻辑分层收口：交互层只经 service（api 不再直连 db/parser/report）、llm 惰性单例、会话模式 svc、修复 upload detached 500 |
+| **2.3.1** | 2026-08-28 | 上线加固：JWT 鉴权 fail-closed（503）、语义降级强制人工、任务并发闸 `MAX_CONCURRENT_TASKS`、备份脚本验证还原、README 出域如实化；本地 mock LLM 端点隔离语义降级 e2e |
+| **2.3.0** | 2026-08-27 | P1/P2 健壮性整改：function calling 决策化（外部能力工具化 + 受约束 LLM 决策）、输入侧注入加固 + 8 步安全清洗、LLM 异常统一降级 + 超时重试配置化、parser P0 数据完整性（docx 表格/文本框、编号子项、混合扫描页级 OCR）、崩溃重放守卫、僵尸线程终态防覆盖、resume 崩溃自愈、OCR 质量指标、分页防 DoS、提交审核终态统一刷新 |
+| **2.2.1** | 2026-08-26 | README 补统一 API 网关对外链路说明 |
+| **2.2.0** | 2026-08-26 | 接入统一 API 网关（Host 虚拟域名路由）+ trace.py traceId 对齐 |
+| **2.1.0** | 2026-08-25 | P3.1 切换共享 infra：去除自带中间件（MySQL），改连共享 infra |
+| **2.0** | 2026-08-24 | B.4 评测契约修复与稳定性加固（结果契约 / 契约清单 / token 落库）；规则管理体验增强；README 重构 + solution/task 文档入库 |
+| **1.0** | 2026-08-11 | 本体驱动合同校验系统初版（抽取-混合校验-人工审核闭环） |
 
 ---
 
