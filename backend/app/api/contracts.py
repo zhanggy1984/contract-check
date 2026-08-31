@@ -17,6 +17,8 @@ MANIFEST = {
         {"name": "result", "path": "/api/tasks/{task_id}/result", "method": "GET",
          "contract_type": "sync", "llm": True,
          "description": "合同校验结果（同步 JSON，透出 answer/usage/timing/tool_calls）"},
+        {"name": "login", "path": "/api/auth/login", "method": "POST",
+         "llm": False, "description": "登录获取 JWT（辅助接口，files/tasks 均挂鉴权需 token）"},
         {"name": "upload", "path": "/api/files/upload", "method": "POST",
          "llm": False, "description": "上传合同文件（辅助接口）"},
     ],
@@ -30,16 +32,25 @@ MANIFEST = {
     "contract": {
         "type": "sync", "timeout": 300,
         "prepare": [
+            # 鉴权闭环：先登录换 JWT，后续受保护接口全部带 Bearer token
+            {"name": "login", "method": "POST", "path": "/api/auth/login",
+             "body": {"username": "{{auth.username}}", "password": "{{auth.password}}"},
+             "extract": {"token": "token"}},
             {"name": "upload", "method": "POST", "path": "/api/files/upload",
+             "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
              "files": {"file": "{{input.file_path}}"},
              "extract": {"task_id": "task_id"}},
             # 决策 #41：不 resume，取 WAITING_REVIEW 时的 result 打分（不产生假 review 记录）
             {"name": "wait_done", "poll": {
                 "path": "/api/tasks/{{prepare.upload.task_id}}",
+                "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
                 "until": {"status": ["WAITING_REVIEW", "SUCCESS", "FAILED", "CANCELLED"]},
                 "interval": 2, "timeout": 300}},
         ],
-        "request": {"path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET"},
+        "request": {
+            "path": "/api/tasks/{{prepare.upload.task_id}}/result", "method": "GET",
+            "headers": {"Authorization": "Bearer {{prepare.login.token}}"},
+        },
     },
 }
 

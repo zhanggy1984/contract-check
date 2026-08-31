@@ -10,8 +10,13 @@ import requests
 s = requests.Session()
 s.trust_env = False
 
-BASE = "http://localhost:8001"
+BASE = "http://localhost:8003"
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-contracts")
+
+# 鉴权闭环：admin/123456 换 JWT，后续接口带 Bearer（T3 校准补充）
+r = s.post(f"{BASE}/api/auth/login", json={"username": "admin", "password": "123456"})
+TOK = r.json().get("token")
+H = {"Authorization": f"Bearer {TOK}"}
 
 # 场景 → (文件名, README 预期)
 SCENARIOS = [
@@ -29,16 +34,16 @@ out = {}
 for name, fname, expect in SCENARIOS:
     with open(os.path.join(DIR, fname), "rb") as fh:
         r = s.post(f"{BASE}/api/files/upload",
-                   files={"file": (fname, fh)})
+                   files={"file": (fname, fh)}, headers=H)
     tid = r.json()["task_id"]
     status = None
     for _ in range(150):  # 最长 ~5 分钟
-        t = s.get(f"{BASE}/api/tasks/{tid}").json()
+        t = s.get(f"{BASE}/api/tasks/{tid}", headers=H).json()
         status = t["status"]
         if status in ("SUCCESS", "FAILED", "CANCELLED", "WAITING_REVIEW", "REVIEWING"):
             break
         time.sleep(2)
-    res = s.get(f"{BASE}/api/tasks/{tid}/result").json()
+    res = s.get(f"{BASE}/api/tasks/{tid}/result", headers=H).json()
     vs = [(v["rule_type"], v["severity"], v["confidence"],
            (v["message"] or "")[:36]) for v in (res.get("violations") or [])]
     skips = [(r["rule_id"], r["result"]) for r in (res.get("rule_results") or [])
