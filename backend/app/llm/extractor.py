@@ -5,6 +5,7 @@
 - finish_reason=length 截断 → 按段降级重抽并合并（同名 Party 去重）
 - 返回 ExtractionResult（std_json + extraction_status + segments）
 """
+import contextvars
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -525,7 +526,11 @@ def _extract_segments(
     failed: list[str] = []
     usage_agg = prior_usage
     with ThreadPoolExecutor(max_workers=min(len(segments), MAX_PARALLEL)) as ex:
-        results = list(ex.map(lambda s: _single(s, partial_model, schema), segments))
+        # contextvars 不自动传播进 ThreadPoolExecutor worker（3.11），而 LLM 出口观测
+        # record_llm 需 task span 上下文锚点——包一层 copy_context().run 让分片跑在提交方
+        # 上下文里（观测启用时打点落到当前合成 task span，禁用时零差异）
+        ctx = contextvars.copy_context()
+        results = list(ex.map(lambda s: ctx.run(_single, s, partial_model, schema), segments))
     for i, (seg, r) in enumerate(zip(segments, results)):  # ex.map 保序
         usage_agg = _merge_usage(usage_agg, r.usage)
         if r.truncated:

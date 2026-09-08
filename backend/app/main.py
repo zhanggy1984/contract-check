@@ -13,6 +13,8 @@ from app.api import auth, contracts, files, rules, tasks, violations
 from app.common.security import require_auth
 from app.common.trace import install, trace_id_var
 from app.config import settings
+from app.obs import (begin_request as obs_begin, end_request as obs_end,
+                     init as obs_init, shutdown as obs_shutdown)
 from app.db import models
 from app.db.session import engine
 from app.ontology.loader import ensure_loaded
@@ -77,6 +79,71 @@ async def log_requests(request: Request, call_next):
     dt = (time.time() - t0) * 1000
     logger.debug("RESP %s %s -> %d (%dms)", request.method, request.url.path,
                  response.status_code, dt)
+    return response
+
+
+# ---------- 观测 request 出入口（§11.3 cc #2；obs_sdk 边带，缺开关即整体直通） ----------
+
+# 豁免打点：健康探针 / 登录入口（与 cs/gq 口径一致，探针与鉴权噪声不入指标）
+_OBS_EXEMPT_PATHS = {"/api/health", "/api/login"}
+
+
+def _obs_finish(response, request, aborted: bool = False) -> None:
+    """request 观测出口收口：断连 > HTTP 状态码 > ok。
+
+    与 cs 同一 status 映射：body 迭代异常（下载中断等）与业务断连都归 error +
+    CLIENT_DISCONNECT——trace 如实反映「未拿到完整响应」；非 2xx 按 HTTP_xxx 记 error；
+    其余 ok。end_request 自判 status 合法性/补 duration，此处不重复。
+    """
+    if aborted:
+        obs_end("error", error_type="CLIENT_DISCONNECT", error_msg="客户端连接中断")
+        return
+    code = response.status_code
+    if code >= 400:
+        obs_end("error", error_type=f"HTTP_{code}")
+        return
+    obs_end("ok")
+
+
+@app.middleware("http")
+async def obs_request_middleware(request: Request, call_next):
+    """观测 request 入口/出口：报告文件流在 body 迭代完成后收口。
+
+    - begin_request：trace_id 沿用网关透传 X-Request-ID（与 log_requests 同源，无则 sdk 自造）；
+      method/path 交给 sdk normalize 归一 interface（动态段 → {id}）。
+    - 收口时点：StreamingResponse（报告下载）须等 body 迭代完成再 end——下载耗时才是真实
+      request 时长，且 LLM 若发生在发送期（cc 仅上传→后台任务，见 check_task_service 合成
+      task span）不至于锚点错序；包一层透传迭代器不缓冲。
+    - 观测未启用（obs_begin 返 False）零开销直通。
+    """
+    if request.url.path in _OBS_EXEMPT_PATHS:
+        return await call_next(request)
+    if not obs_begin(method=request.method, path=request.url.path,
+                     trace_id=request.headers.get("X-Request-ID")):
+        return await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        obs_end("error", error_type="UNHANDLED_EXCEPTION")
+        raise
+
+    body_iter = getattr(response, "body_iterator", None)
+    if body_iter is None:
+        # 非流式响应体已整体生成：直接收口（status_code 即可判定）
+        _obs_finish(response, request)
+        return response
+
+    async def _body_with_obs():
+        try:
+            async for chunk in body_iter:
+                yield chunk
+        except BaseException:
+            _obs_finish(response, request, aborted=True)
+            raise
+        else:
+            _obs_finish(response, request)
+
+    response.body_iterator = _body_with_obs()
     return response
 
 
@@ -166,6 +233,7 @@ def startup() -> None:
     _ensure_column(engine, "contract_file", "page_texts_json", "LONGTEXT")
     _ensure_unique_index(engine, "ontology_version", "md5")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
+    obs_init("contract-check")  # 观测边带装配（§11.3 cc #1；须先于 recover_pending，恢复任务打点有 sdk）
     svc.cleanup_terminal_checkpoints()  # 启动兜底：清理终态任务 checkpoint（T4.3-2）
     svc.cleanup_orphan_files()          # 启动兜底：清理孤儿文件（T4.3-3）
     svc.recover_pending()    # 启动恢复未完成任务
@@ -175,3 +243,9 @@ def startup() -> None:
 def health():
     # auth_required 供前端决定是否展示登录页（鉴权关闭的评测/开发模式跳过登录）
     return {"status": "ok", "auth_required": settings.auth_enabled}
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    """收尾：观测终刷剩余事件后关线程（obs_sdk 幂等，未 init 也安全）。"""
+    obs_shutdown()

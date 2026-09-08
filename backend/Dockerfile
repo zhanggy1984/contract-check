@@ -12,6 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
 
+# obs-sdk 观测 SDK（§11.3 cc 接入）：源码经 compose additional_contexts 独立 context 注入
+# （docker-compose.yml build.additional_contexts.obs-sdk → 本 COPY 的 --from=obs-sdk）。
+# 装拷贝副本而非 -e editable（镜像内无仓外路径）；观测边带在 .env 关闭时
+# （OBS_ENABLED=false）代码路径不触碰本包，此层仍装以保证可回切。
+COPY --from=obs-sdk / /obs-sdk-src
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ /obs-sdk-src
+
 # 应用代码 + 规则 + 中文字体
 COPY app ./app
 COPY ontology ./ontology

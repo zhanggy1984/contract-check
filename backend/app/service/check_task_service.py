@@ -4,6 +4,7 @@
 本模块作为控制层入口，对交互层暴露任务查询/报告渲染/上传落库等委托方法。
 """
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -21,7 +22,9 @@ from sqlalchemy.orm import joinedload
 
 from app.common.constants import TaskStatus, ViolationStatus
 from app.common.errors import TaskCancelledError
+from app.common.trace import trace_id_var
 from app.config import settings
+from app.obs import begin_request as obs_begin, end_request as obs_end
 from app.graph.build import DATABASE_URL, build_graph
 from app.db.models import CheckRule, CheckTask, ContractFile, RuleCheckResult, Violation
 from app.db.serializers import violation_to_dict
@@ -151,6 +154,33 @@ def update_status(task_id: int, status: str, progress: int | None = None, error:
         db.commit()
 
 
+def _begin_task_span(task_id: int) -> bool:
+    """合成 task span（§11.3 cc #3 llm_call 锚点）。返回是否真建了 span（观测关闭/异常 = False）。"""
+    try:
+        # interface 归一：{task_id} 动态段 → {id}，dashboard 按 "POST /internal/check-tasks/{id}/run"
+        # 分组恒定；trace_id 用 task-{id}，与后台日志 trace 同源可整任务检索
+        return obs_begin(method="POST", path=f"/internal/check-tasks/{task_id}/run",
+                         trace_id=f"task-{task_id}")
+    except Exception:
+        logger.debug("[obs] 合成 task span begin 异常 task_id=%s", task_id, exc_info=True)
+        return False
+
+
+def _end_task_span(begun: bool, outcome: str, error: str | None = None) -> None:
+    """task span 收口：ok / timeout / cancelled / error → 对应 status + error_type。
+
+    status=error 必带 error_type 是消费端保真前提（缺则 sdk 事件不产），故此处显式映射。
+    """
+    if not begun:
+        return
+    if outcome == "ok":
+        obs_end("ok")
+        return
+    error_type = {"timeout": "TIMEOUT", "cancelled": "CANCELLED",
+                  "error": "INTERNAL_ERROR"}.get(outcome, "INTERNAL_ERROR")
+    obs_end("error", error_type=error_type, error_msg=(error or "任务执行异常")[:512])
+
+
 def run_task_async(task_id: int) -> None:
     """后台异步执行任务流程；异常/超时置 FAILED。
 
@@ -161,6 +191,12 @@ def run_task_async(task_id: int) -> None:
     timeout = settings.task_timeout_seconds
 
     async def _go():
+        # 后台任务作为独立 trace 根（§11.3 cc #3）：create_task 若沿用调用方 context，会继承
+        # 「上传 request 已开始但未结束」的孤儿 span 副本（响应返回后才 reset，副本仍在）——
+        # 合成 task span 会触发 obs_sdk 嵌套告警、日志/事件也串到上传 trace。故以全新 context
+        # 隔离，并把 trace_id_var 统一置 task-{id}（日志 trace 与观测 task span 同源可对账）。
+        trace_id_var.set(f"task-{task_id}")
+        begun = _begin_task_span(task_id)
         try:
             # 并发闸：先在 worker 线程排队拿闸（不阻塞事件循环），空位释放才进 _run_flow；
             # acquire 在 wait_for 之前，排队不计入超时预算；release 放 finally 保证按时释放
@@ -172,17 +208,24 @@ def run_task_async(task_id: int) -> None:
             finally:
                 sem.release()
         except asyncio.TimeoutError:
+            _end_task_span(begun, "timeout")
             update_status(task_id, TaskStatus.FAILED.value,
                           error=f"任务执行超时（超过 {timeout} 秒）")
         except TaskCancelledError:  # 节点入口 CANCELLED 短路 → 置 CANCELLED 而非 FAILED
+            _end_task_span(begun, "cancelled")
             update_status(task_id, TaskStatus.CANCELLED.value, error="任务已取消")
         except Exception as e:
+            _end_task_span(begun, "error", str(e))
             update_status(task_id, TaskStatus.FAILED.value, error=str(e))
+        else:
+            # 正常返回 = 图执行未抛异常（含走到 WAITING_REVIEW 人工审核 interrupt）
+            _end_task_span(begun, "ok")
         finally:
             _ACTIVE.discard(task_id)
             _cleanup_if_terminal(task_id)  # 终态即清 checkpoint（T4.3-2）
 
-    asyncio.create_task(_go())
+    # context=全新 Context：任务不继承调用方的 contextvar（trace_id/obs span），见 _go 注释
+    asyncio.create_task(_go(), context=contextvars.Context())
 
 
 def resume_task(task_id: int, reviews: list) -> bool:
