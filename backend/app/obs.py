@@ -8,9 +8,10 @@
 - record_llm 强依赖 request span（sdk _require_span 无 span 事件不产），LLM 打点合法性
   由 begin/end 的 request 生命周期保证（合成 task span 见 check_task_service）。
 
-打点口径（error_type 自由字符串，消费端仅保真展示/分组）：
+打点口径（**LLM 级 error_type 是平台错误分类白名单值域，非自由字符串**；白名单外的值
+平台不产生回流候选，故 LLM 级一律经 llm_error_type 折叠；request 级仍是自由字符串）：
 - request 级：HTTP 状态码 >=400 → HTTP_{code}；后台任务超时/取消/异常 → TIMEOUT/CANCELLED/INTERNAL_ERROR。
-- LLM 级：HTTP 状态优先（openai 异常带 status_code），其余按异常类名归并（见 llm_error_type）。
+- LLM 级：仅 429 单列（llm_rate_limit），其余状态码/类名在白名单无对应词统一归 llm_other（见 llm_error_type）。
 """
 import logging
 import time
@@ -131,17 +132,22 @@ def record_llm_error(started: float, exc: BaseException) -> None:
 
 
 def llm_error_type(exc: BaseException) -> str:
-    """LLM 异常 → error_type：HTTP 状态优先（口径对齐 cs 的 HTTP_xxx），其余按类名归并。"""
+    """LLM 异常 → error_type（平台错误分类白名单值域，**非自由字符串**，口径对齐 cs）。
+
+    仅 429 单列（白名单 llm_rate_limit）；其余状态码（含 401/403 auth 类）与类名在白名单
+    无对应词，统一归 llm_other——原始信息由 error_msg 保留。
+    """
     code = getattr(exc, "status_code", None)
     if isinstance(code, int):
-        return f"HTTP_{code}"
+        return "llm_rate_limit" if code == 429 else "llm_other"
     name = type(exc).__name__.lower()
-    for kw, label in (("timeout", "TIMEOUT"), ("connection", "CONNECTION_ERROR"),
-                      ("ratelimit", "RATE_LIMIT"), ("rate", "RATE_LIMIT"),
-                      ("auth", "AUTH_ERROR")):
-        if kw in name:
-            return label
-    return "LLM_ERROR"
+    if "timeout" in name:
+        return "llm_timeout"
+    if "connection" in name or "connect" in name:
+        return "llm_connection"
+    if "ratelimit" in name or "rate" in name:
+        return "llm_rate_limit"
+    return "llm_other"
 
 
 def _duration_since(started: float) -> int:

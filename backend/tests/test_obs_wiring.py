@@ -56,17 +56,17 @@ class TestObsGate(unittest.TestCase):
             self.assertIsNone(app.obs.obs())
 
     def test_error_type_mapping(self):
-        """HTTP 状态优先，其余按类名归并（口径对齐 cs HTTP_xxx）。"""
+        """仅 429 单列，其余状态码/类名统一归 llm_other（平台白名单值域，口径对齐 cs）。"""
         class _E500(Exception):
             status_code = 503
 
         class _E(Exception):
             pass
 
-        self.assertEqual(app.obs.llm_error_type(_E500()), "HTTP_503")
-        self.assertEqual(app.obs.llm_error_type(TimeoutError()), "TIMEOUT")
-        self.assertEqual(app.obs.llm_error_type(ConnectionError()), "CONNECTION_ERROR")
-        self.assertEqual(app.obs.llm_error_type(RuntimeError("x")), "LLM_ERROR")
+        self.assertEqual(app.obs.llm_error_type(_E500()), "llm_other")
+        self.assertEqual(app.obs.llm_error_type(TimeoutError()), "llm_timeout")
+        self.assertEqual(app.obs.llm_error_type(ConnectionError()), "llm_connection")
+        self.assertEqual(app.obs.llm_error_type(RuntimeError("x")), "llm_other")
 
     def test_record_ok_error_passthrough(self):
         """ok 透传 usage；error 透传 error_type + error_msg（先记再抛由 chokepoint 保证）。"""
@@ -82,7 +82,7 @@ class TestObsGate(unittest.TestCase):
         self.assertEqual(ok_c["model"], settings.deepseek_model)
         self.assertIsNotNone(ok_c["duration_ms"]) and ok_c["duration_ms"] >= 0
         self.assertEqual(err_c["status"], "error")
-        self.assertEqual(err_c["error_type"], "LLM_ERROR")
+        self.assertEqual(err_c["error_type"], "llm_other")
         self.assertEqual(err_c["error_msg"], "boom")
         self.assertIsNone(err_c["usage"])
 
@@ -180,7 +180,7 @@ class TestCallJsonObs(unittest.TestCase):
         self.assertIsNotNone(call["duration_ms"])
 
     def test_error_5xx_records_then_raises(self):
-        """OpenAIError 折叠 5xx（status_code=503）→ 先记 error HTTP_503 再抛 LLMError（§2.4）。"""
+        """OpenAIError 折叠 5xx（status_code=503）→ 先记 error（折叠 llm_other）再抛 LLMError（§2.4）。"""
         class _Err503(Exception):
             status_code = 503
 
@@ -191,7 +191,7 @@ class TestCallJsonObs(unittest.TestCase):
             with self.assertRaises(LLMError):
                 llm_client.call_json("sys", "usr")
         self.assertEqual(self.fake.llm_calls[-1]["status"], "error")
-        self.assertEqual(self.fake.llm_calls[-1]["error_type"], "HTTP_503")
+        self.assertEqual(self.fake.llm_calls[-1]["error_type"], "llm_other")
         self.assertIsNone(self.fake.llm_calls[-1]["usage"])
 
     def test_disabled_no_record(self):
@@ -225,14 +225,14 @@ class TestCallWithToolsObs(unittest.TestCase):
         self.assertEqual(self.fake.llm_calls[-1]["usage"]["total_tokens"], 4)
 
     def test_error_records_then_raises(self):
-        """异常（无 status_code → LLM_ERROR）→ 先记 error 再原样上抛。"""
+        """异常（无 status_code → llm_other）→ 先记 error 再原样上抛。"""
         with mock.patch("app.obs.obs", return_value=self.fake), \
              mock.patch.object(tool_client, "_decision_model",
                                return_value=_Llms([RuntimeError("boom")])):
             with self.assertRaises(RuntimeError):
                 tool_client.call_with_tools("sys", "usr", self.tools)
         self.assertEqual(self.fake.llm_calls[-1]["status"], "error")
-        self.assertEqual(self.fake.llm_calls[-1]["error_type"], "LLM_ERROR")
+        self.assertEqual(self.fake.llm_calls[-1]["error_type"], "llm_other")
         self.assertEqual(self.fake.llm_calls[-1]["error_msg"], "boom")
 
 
