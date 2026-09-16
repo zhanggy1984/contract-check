@@ -94,15 +94,21 @@ def _obs_finish(response, request, aborted: bool = False) -> None:
     与 cs 同一 status 映射：body 迭代异常（下载中断等）与业务断连都归 error +
     CLIENT_DISCONNECT——trace 如实反映「未拿到完整响应」；非 2xx 按 HTTP_xxx 记 error；
     其余 ok。end_request 自判 status 合法性/补 duration，此处不重复。
+
+    入参由业务路由置 request.state.obs_input（同 cs 惯例），四条出口都带上——平台侧只认
+    root input 作 root 去重键与 case 现场，error 路径不给则失败 trace 建不出簇（环③ Fork A）。
+    未置位的路由 input 为 None，与接入前行为一致。
     """
+    obs_input = getattr(request.state, "obs_input", None)
     if aborted:
-        obs_end("error", error_type="CLIENT_DISCONNECT", error_msg="客户端连接中断")
+        obs_end("error", error_type="CLIENT_DISCONNECT", error_msg="客户端连接中断",
+                input=obs_input)
         return
     code = response.status_code
     if code >= 400:
-        obs_end("error", error_type=f"HTTP_{code}")
+        obs_end("error", error_type=f"HTTP_{code}", input=obs_input)
         return
-    obs_end("ok")
+    obs_end("ok", input=obs_input)
 
 
 @app.middleware("http")
@@ -124,7 +130,8 @@ async def obs_request_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        obs_end("error", error_type="UNHANDLED_EXCEPTION")
+        obs_end("error", error_type="UNHANDLED_EXCEPTION",
+                input=getattr(request.state, "obs_input", None))
         raise
 
     body_iter = getattr(response, "body_iterator", None)

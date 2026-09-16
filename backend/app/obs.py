@@ -86,13 +86,19 @@ def begin_request(*, method: str = "GET", path: str = "/",
 
 
 def end_request(status: str, *, error_type: str | None = None,
-                error_msg: str | None = None) -> None:
-    """request 出口。status 合法性/补 duration 由 sdk 自判，此处不重复。"""
+                error_msg: str | None = None, input: object = None) -> None:
+    """request 出口。status 合法性/补 duration 由 sdk 自判，此处不重复。
+
+    input 是该请求入参：sdk 侧「不传则事件不带该键」，而平台侧 root_input_hash 与
+    case 现场**只认这个键**——缺则 trace_judge_state.root_input_hash 恒 NULL，
+    cluster_job 按「残 trace 无 input 现场」（Fork A）只置 processed 不建簇，
+    回流闭环直接断在环③。故各出口都要给得出入参；合成 span 的真实入参即 task_id。
+    """
     mod = obs()
     if mod is None:
         return
     try:
-        mod.end_request(status, error_type=error_type, error_msg=error_msg)
+        mod.end_request(status, error_type=error_type, error_msg=error_msg, input=input)
     except Exception:
         logger.debug("[obs] end_request 异常", exc_info=True)
 
