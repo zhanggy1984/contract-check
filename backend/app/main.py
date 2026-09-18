@@ -238,6 +238,9 @@ def startup() -> None:
     _ensure_column(engine, "check_task", "sem_outcomes_json", "LONGTEXT")
     _ensure_column(engine, "check_task", "sem_usage_json", "LONGTEXT")
     _ensure_column(engine, "contract_file", "page_texts_json", "LONGTEXT")
+    # F3：本次上传的文件名落到 task 侧。存量行为 ''（默认空串），展示层回退读 contract_file.file_name，
+    # 故升级后历史记录显示不变；只有升级后新上传的 task 才带自己的名字。
+    _ensure_column(engine, "check_task", "original_name", "VARCHAR(255) NOT NULL DEFAULT ''")
     _ensure_unique_index(engine, "ontology_version", "md5")
     ensure_loaded()          # 加载本体 + 版本落库（T1.1）
     obs_init("contract-check")  # 观测边带装配（§11.3 cc #1；须先于 recover_pending，恢复任务打点有 sdk）

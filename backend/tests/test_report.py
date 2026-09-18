@@ -21,10 +21,12 @@ STD_JSON = """{
 }"""
 
 
-def _task() -> SimpleNamespace:
+def _task(original_name: str = "") -> SimpleNamespace:
+    # original_name 是 check_task 的列（F3），假对象须与模型同形；默认 "" 即存量行
     return SimpleNamespace(
         id=30, status="WAITING_REVIEW", extraction_status="COMPLETE",
         llm_model="deepseek-chat", create_time=datetime(2026, 8, 11, 8, 0, 0),
+        original_name=original_name,
         contract_file=SimpleNamespace(
             file_name="scanned_test.pdf", file_type="PDF", file_size=11330688,
             has_scanned=True, ocr_applied=True),
@@ -86,9 +88,18 @@ class _FakeDb:
 
 
 class TestBuildReportData(unittest.TestCase):
-    def _data(self):
-        db = _FakeDb(_task(), [_rule(1), _rule(26, "SEMANTIC")], [_rcr(1), _rcr(26, "FAIL")], [_viol(26)])
+    def _data(self, original_name: str = ""):
+        db = _FakeDb(_task(original_name), [_rule(1), _rule(26, "SEMANTIC")],
+                     [_rcr(1), _rcr(26, "FAIL")], [_viol(26)])
         return build_report_data(db, 30)
+
+    def test_export_name_prefers_this_upload_name(self):
+        """F3：导出报告的文件名须与历史记录同口径——本次上传名优先，存量行回退去重名。
+
+        不跟着改就会出现「列表显示本次名、下载下来还是旧名」的同数据两口径。
+        """
+        self.assertEqual(self._data().file_name, "scanned_test.pdf")
+        self.assertEqual(self._data("本次上传.pdf").file_name, "本次上传.pdf")
 
     def test_missing_task_raises(self):
         db = _FakeDb(_task(), [], [], [])

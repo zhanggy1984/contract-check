@@ -16,7 +16,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 from langgraph.types import Command
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 
@@ -427,14 +427,19 @@ STALE_ORPHAN_MINUTES = 60
 
 
 def _sanitize_filename(name: str | None) -> str:
-    """上传文件名清洗（T4.3-8）：None→""、超 255 时保留扩展名截断主干
+    """上传文件名清洗（T4.3-8）：None→""、**先剥路径**、超 255 时保留扩展名截断主干
     （DB VARCHAR(255)，防 DataError 1406；存储路径用 sha，截断只影响展示名）。
+
+    **剥路径（F3）**：multipart 里 filename 由客户端声明、后端原样信任（`api/files.py:22`），
+    非浏览器的调用方（脚本/curl）常把整条相对或绝对路径塞进来，实测库里存过
+    `data/acceptance/good.pdf`。展示名只应是 basename，故统一按 `/` 与 `\\` 取末段。
 
     截断保留最后一个扩展名（a.tar.gz → a.tar 截主干 + .gz），展示一致性优先；
     无扩展名（或扩展名自身超长）时退化裸截断。后端自愈而非 422 拒绝——前端无长度提示。
     """
     if not name:
         return ""
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]   # 先剥路径，再判长度
     if len(name) <= FILE_NAME_MAX:
         return name
     dot = name.rfind(".")
@@ -654,20 +659,26 @@ def render_report(task_id: int, fmt: str):
 
 def list_tasks(status: str | None = None, file_name: str | None = None,
                page: int = 1, size: int = 10) -> dict:
-    """历史记录：分页 + 状态/文件名筛选（joinedload 防 N+1）。"""
+    """历史记录：分页 + 状态/文件名筛选（joinedload 防 N+1）。
+
+    F3：展示名取 task 自己的 `original_name`（本次上传声明的名字），为空时（存量行）回退
+    `contract_file.file_name`。筛选与展示必须走**同一表达式**，否则会出现「筛得到却看不出来」。
+    """
     with SessionLocal() as db:
         q = db.query(CheckTask).options(joinedload(CheckTask.contract_file))
         if status:
             q = q.filter(CheckTask.status == status)
         if file_name:
-            q = q.join(ContractFile).filter(ContractFile.file_name.like(f"%{file_name}%"))
+            q = q.join(ContractFile).filter(
+                func.coalesce(func.nullif(CheckTask.original_name, ""),
+                              ContractFile.file_name).like(f"%{file_name}%"))
         total = q.count()
         items = q.order_by(CheckTask.id.desc()).offset((page - 1) * size).limit(size).all()
     return {
         "total": total, "page": page, "size": size,
         "items": [{
             "id": t.id, "status": t.status, "extraction_status": t.extraction_status,
-            "file_name": t.contract_file.file_name,
+            "file_name": t.original_name or t.contract_file.file_name,
             "create_time": t.create_time.isoformat() if t.create_time else None,
         } for t in items],
     }
@@ -755,8 +766,9 @@ def save_uploaded_file(original_name: str | None, ext: str, file_type: str, data
             else:
                 db.refresh(cf)
 
-        # 创建校验任务并后台启动图执行
-        task = CheckTask(contract_file_id=cf.id, status=TaskStatus.PENDING.value, progress=0)
+        # 创建校验任务并后台启动图执行（F3：本次上传的文件名写在本 task 上，不随 sha 去重被复用）
+        task = CheckTask(contract_file_id=cf.id, original_name=_sanitize_filename(original_name),
+                         status=TaskStatus.PENDING.value, progress=0)
         db.add(task)
         db.commit()
         db.refresh(task)
