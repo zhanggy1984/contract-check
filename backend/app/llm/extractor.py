@@ -529,8 +529,14 @@ def _extract_segments(
         # contextvars 不自动传播进 ThreadPoolExecutor worker（3.11），而 LLM 出口观测
         # record_llm 需 task span 上下文锚点——包一层 copy_context().run 让分片跑在提交方
         # 上下文里（观测启用时打点落到当前合成 task span，禁用时零差异）
-        ctx = contextvars.copy_context()
-        results = list(ex.map(lambda s: ctx.run(_single, s, partial_model, schema), segments))
+        # 每个 worker 必须各持一份 Context 副本：同一个 Context 对象不允许被并发 enter，
+        # 否则抛 RuntimeError: cannot enter context: ... is already entered（多段并行时必现）。
+        # 注意副本取自提交方捕获的 parent_ctx，不能在 lambda 内调 copy_context()——那拷的是
+        # worker 自己的空上下文，会丢掉提交方的 task span，修好并发却弄坏观测锚点。
+        parent_ctx = contextvars.copy_context()
+        results = list(
+            ex.map(lambda s: parent_ctx.copy().run(_single, s, partial_model, schema), segments)
+        )
     for i, (seg, r) in enumerate(zip(segments, results)):  # ex.map 保序
         usage_agg = _merge_usage(usage_agg, r.usage)
         if r.truncated:
