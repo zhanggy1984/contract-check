@@ -139,6 +139,40 @@ class TestListRules(_RuleDB):
         self.assertEqual(ids, [c.id for c in reversed(created)], "列表应按 ID 倒序")
 
 
+class TestUpdateRule(_RuleDB):
+    """F6 回归：请求体键是 name（与 CreateBody 同口径），ORM 属性是 rule_name。
+
+    修前 `update_rule` 把 "rule_name" 混在遍历元组里，而唯一调用方 api/rules.py
+    发的是 UpdateBody.model_dump() ⇒ 键恒为 name ⇒ 改名是条死分支。
+    真机实证：同一个 PUT 里 severity 落库、name 不落库（见 task.md §3.12）。
+    """
+
+    def test_rename_takes_effect(self):
+        r = self._rule(rule_name="旧名", rule_iri="urn:rule:manual:旧名")
+        svc.update_rule(self.db, r.id, {"name": "新名"})
+        self.assertEqual(self.db.get(CheckRule, r.id).rule_name, "新名")
+
+    def test_rename_absent_keeps_old_name(self):
+        """只改 severity 的 PUT（exclude_none 后 name 缺席）不能把名字弄丢。"""
+        r = self._rule(rule_name="旧名")
+        svc.update_rule(self.db, r.id, {"severity": Severity.MEDIUM.value})
+        updated = self.db.get(CheckRule, r.id)
+        self.assertEqual(updated.rule_name, "旧名")
+        self.assertEqual(updated.severity, Severity.MEDIUM.value)
+
+    def test_rename_ignored_for_ontology_rule(self):
+        """本体规则只读：name 必须被忽略，别因为修 F6 把改名权限漏给它。"""
+        r = self._rule(rule_name="本体名", source=RuleSource.ONTOLOGY_GENERATED.value,
+                       ontology_version_id=1)
+        svc.update_rule(self.db, r.id, {"name": "改它", "severity": Severity.LOW.value})
+        updated = self.db.get(CheckRule, r.id)
+        self.assertEqual(updated.rule_name, "本体名")
+        self.assertEqual(updated.severity, Severity.LOW.value, "severity 是本体规则允许改的字段")
+
+    def test_not_found_returns_none(self):
+        self.assertIsNone(svc.update_rule(self.db, 9999, {"name": "x"}))
+
+
 class TestRuleGeneratorLabels(unittest.TestCase):
     def test_cls_label(self):
         self.assertEqual(rg._cls_label("Contract"), "合同")
