@@ -151,11 +151,18 @@ class TestContractsManifest(unittest.TestCase):
         paths = {i["path"] for i in m["interfaces"]}
         self.assertIn("/api/files/upload", paths)
         self.assertIn("/api/tasks/{task_id}/result", paths)
-        # contract 段（manifest v2）：驱动契约必须带 upload + wait_done(poll) + request
+        # contract 段（manifest v2）：驱动契约必须带 login + upload + wait_done(poll) + request
         c = m["contract"]
         self.assertEqual(c["type"], "sync")
-        self.assertEqual([p["name"] for p in c["prepare"]], ["upload", "wait_done"])
-        self.assertIn("poll", c["prepare"][1])
+        self.assertEqual([p["name"] for p in c["prepare"]], ["login", "upload", "wait_done"])
+        # 鉴权闭环：login 换 JWT，后续受保护步骤引用其 extract 出的 token
+        login = c["prepare"][0]
+        self.assertEqual(login["extract"], {"token": "token"})
+        upload = c["prepare"][1]
+        self.assertEqual(upload["headers"]["Authorization"], "Bearer {{prepare.login.token}}")
+        # 按名取 wait_done，避免后续再往前插 prepare 步骤时断言随下标一起错
+        wait_done = next(p for p in c["prepare"] if p["name"] == "wait_done")
+        self.assertIn("poll", wait_done)
         self.assertEqual(c["request"]["method"], "GET")
 
     def test_result_interface_is_llm_sync(self):

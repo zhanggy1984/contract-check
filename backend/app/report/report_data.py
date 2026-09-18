@@ -119,7 +119,8 @@ def build_report_data(db: Session, task_id: int) -> ReportData:
         task_id=task.id, task_status=task.status, extraction_status=task.extraction_status,
         llm_model=task.llm_model,
         create_time=task.create_time.isoformat() if task.create_time else None,
-        file_name=cf.file_name, file_type=cf.file_type,
+        # F3：与 list_tasks 同一口径——优先本次上传声明的名字，存量行回退去重名
+        file_name=task.original_name or cf.file_name, file_type=cf.file_type,
         file_size=f"{cf.file_size / 1024:.1f} KB", has_scanned=cf.has_scanned, ocr_applied=cf.ocr_applied,
         summary=summary, parties=parties, items=items,
         rule_results=[_rcr(r) for r in results], violations=[_v(v) for v in violations],

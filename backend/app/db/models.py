@@ -46,6 +46,12 @@ class CheckTask(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     contract_file_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("contract_file.id"), nullable=False)
+    # 本次上传声明的文件名（F3）：名字是「这次上传」的属性，不是「这份内容」的属性。
+    # contract_file 按 sha256 去重，同一行会被多个 task 引用（实测 id=94 → #660/661/663），
+    # 名字存那边会「首次叫什么、以后永远叫什么」（#664 传 f3probe_918a.pdf 却显示旧名）。
+    # 且就地改 contract_file.file_name 会波及历史记录 ⇒ 必须落在 task 侧。
+    # 存量行为 ""，展示层回退读 contract_file.file_name。
+    original_name: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
     status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)

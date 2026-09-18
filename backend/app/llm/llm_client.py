@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from openai import LengthFinishReasonError, OpenAIError
 
 from app.config import settings
+from app.obs import llm_start, record_llm_error, record_llm_ok
 
 MAX_TOKENS = 8192
 
@@ -47,6 +48,7 @@ def call_json(system: str, user: str) -> tuple[str | None, str, dict[str, Any] |
     finish_reason == "length" 表示输出被 max_tokens 截断，调用方须分段重抽。
     """
     llm = get_chat_model()
+    started = llm_start()  # LLM 出口观测计时（§11.3 cc #3；观测未启用零开销）
     try:
         resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
     except LengthFinishReasonError as e:
@@ -60,10 +62,12 @@ def call_json(system: str, user: str) -> tuple[str | None, str, dict[str, Any] |
             content = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
         finish_reason = str(comp.choices[0].finish_reason or "length") if comp.choices else "length"
         usage = comp.usage.model_dump() if comp.usage else None
+        record_llm_ok(started, usage)  # length 截断是"交付了可用部分"→ 计成功（上层分段降级）
         return (content if isinstance(content, str) else None, finish_reason, usage)
     except OpenAIError as e:
         # 网络/超时/限流/服务端错误：SDK 已按 max_retries 重试耗尽，此处包装为 LLMError
         # 交调用方（extractor/semantic_evaluator）降级，避免裸抛导致任务 FAILED 且无审计信息
+        record_llm_error(started, e)  # 先记 error 再抛（§2.4 前提，失败率不丢）
         raise LLMError(f"LLM 调用失败: {e}") from e
     content = resp.content
     if isinstance(content, list):  # 个别情况 content 为块列表，取文本
@@ -71,4 +75,5 @@ def call_json(system: str, user: str) -> tuple[str | None, str, dict[str, Any] |
     meta = resp.response_metadata
     finish_reason = str(meta.get("finish_reason", "") or "")
     usage = meta.get("token_usage") or meta.get("usage") or None
+    record_llm_ok(started, usage)
     return (content if isinstance(content, str) else None, finish_reason, usage)

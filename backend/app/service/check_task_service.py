@@ -4,6 +4,7 @@
 本模块作为控制层入口，对交互层暴露任务查询/报告渲染/上传落库等委托方法。
 """
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -15,13 +16,15 @@ from pathlib import Path
 
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 from langgraph.types import Command
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 
 from app.common.constants import TaskStatus, ViolationStatus
 from app.common.errors import TaskCancelledError
+from app.common.trace import trace_id_var
 from app.config import settings
+from app.obs import begin_request as obs_begin, end_request as obs_end
 from app.graph.build import DATABASE_URL, build_graph
 from app.db.models import CheckRule, CheckTask, ContractFile, RuleCheckResult, Violation
 from app.db.serializers import violation_to_dict
@@ -151,6 +154,75 @@ def update_status(task_id: int, status: str, progress: int | None = None, error:
         db.commit()
 
 
+def _begin_task_span(task_id: int) -> bool:
+    """合成 task span（§11.3 cc #3 llm_call 锚点）。返回是否真建了 span（观测关闭/异常 = False）。"""
+    try:
+        # interface 取**契约业务接口** GET /api/tasks/{id}/result，而非 internal 执行路径：
+        # 平台侧 interface 是「可重放的业务入口」，离线回流按 (agent, method, path) 逐段匹配
+        # 登记表，命中才建 case。后台任务的失败正是客户端查 result 时才看到的失败，且离线
+        # 评测的 prepare（login→upload→wait_done）会先建出 task_id ⇒ 该现场真能重放。
+        # 用 internal 路径会因未登记被 offline_cap_gap 驳回（2026-09-16 实测）。
+        # method 必须与登记值同为 GET（离线按 method 精确匹配，占位段才通配）。
+        # trace_id 仍用 task-{id}，与后台日志 trace 同源可整任务检索。
+        return obs_begin(method="GET", path=f"/api/tasks/{task_id}/result",
+                         trace_id=f"task-{task_id}")
+    except Exception:
+        logger.debug("[obs] 合成 task span begin 异常 task_id=%s", task_id, exc_info=True)
+        return False
+
+
+def _obs_task_input(task_id: int | None) -> dict | None:
+    """合成 span 的入参现场：**按下游（离线评测）的参数口径**给出 file_path。
+
+    平台侧 case.input 由本键渲染后再交回离线重放，而离线契约 prepare 的 multipart 取
+    {case.input.file_path}，出站前有白名单（offline adapters/base.py:84）——值必须是
+    **离线容器** /app/uploads 内的路径。故这里写 /app/uploads/{原名}：离线评测时正是
+    从该路径把这份原件传上来的（multipart 用 basename 作文件名，见 base.py:73），
+    两侧指同一份文件，现场才真能重放。共享真实文件靠两边口径一致，不靠共享卷。
+
+    反面（2026-09-16 实测）：只写 task_id → 离线 content_gap 闸判「file_path 在
+    evidence.input 中不可达」驳回（inbox id=19）；写 cc 自己的存储路径
+    /app/data/uploads/{sha}.pdf → 被上述白名单 ValueError。
+
+    task_id 一并保留：它是 cc 侧现场标识，与 file_path 不冲突，便于人工对账。
+    """
+    payload = {"task_id": task_id} if task_id is not None else None
+    if task_id is None:
+        return payload
+    try:
+        with SessionLocal() as db:
+            row = (db.query(ContractFile.file_name)
+                     .join(CheckTask, CheckTask.contract_file_id == ContractFile.id)
+                     .filter(CheckTask.id == task_id).first())
+        if row and row[0]:
+            payload["file_path"] = f"/app/uploads/{row[0]}"
+    except Exception:
+        # 观测取材失败不得影响任务收口（与 obs.py 内层 try 同口径）
+        logger.debug("[obs] 取 task 现场失败 task_id=%s", task_id, exc_info=True)
+    return payload
+
+
+def _end_task_span(begun: bool, outcome: str, error: str | None = None,
+                   input_payload: dict | None = None) -> None:
+    """task span 收口：ok / timeout / cancelled / error → 对应 status + error_type。
+
+    status=error 必带 error_type 是消费端保真前提（缺则 sdk 事件不产），故此处显式映射。
+    input 传 _obs_task_input 的结果（关键是 file_path）：平台侧 root 去重键与 case 现场
+    只认它，不给则该 trace 永远建不出簇（环③ Fork A「残 trace 无 input 现场」），
+    失败现场白造。
+    """
+    if not begun:
+        return
+    payload = input_payload
+    if outcome == "ok":
+        obs_end("ok", input=payload)
+        return
+    error_type = {"timeout": "TIMEOUT", "cancelled": "CANCELLED",
+                  "error": "INTERNAL_ERROR"}.get(outcome, "INTERNAL_ERROR")
+    obs_end("error", error_type=error_type, error_msg=(error or "任务执行异常")[:512],
+            input=payload)
+
+
 def run_task_async(task_id: int) -> None:
     """后台异步执行任务流程；异常/超时置 FAILED。
 
@@ -161,6 +233,14 @@ def run_task_async(task_id: int) -> None:
     timeout = settings.task_timeout_seconds
 
     async def _go():
+        # 后台任务作为独立 trace 根（§11.3 cc #3）：create_task 若沿用调用方 context，会继承
+        # 「上传 request 已开始但未结束」的孤儿 span 副本（响应返回后才 reset，副本仍在）——
+        # 合成 task span 会触发 obs_sdk 嵌套告警、日志/事件也串到上传 trace。故以全新 context
+        # 隔离，并把 trace_id_var 统一置 task-{id}（日志 trace 与观测 task span 同源可对账）。
+        trace_id_var.set(f"task-{task_id}")
+        begun = _begin_task_span(task_id)
+        # 现场只取一次（四处出口共用）；obs 关闭时不查库，保持直通路径零开销
+        task_input = _obs_task_input(task_id) if begun else None
         try:
             # 并发闸：先在 worker 线程排队拿闸（不阻塞事件循环），空位释放才进 _run_flow；
             # acquire 在 wait_for 之前，排队不计入超时预算；release 放 finally 保证按时释放
@@ -172,17 +252,24 @@ def run_task_async(task_id: int) -> None:
             finally:
                 sem.release()
         except asyncio.TimeoutError:
+            _end_task_span(begun, "timeout", input_payload=task_input)
             update_status(task_id, TaskStatus.FAILED.value,
                           error=f"任务执行超时（超过 {timeout} 秒）")
         except TaskCancelledError:  # 节点入口 CANCELLED 短路 → 置 CANCELLED 而非 FAILED
+            _end_task_span(begun, "cancelled", input_payload=task_input)
             update_status(task_id, TaskStatus.CANCELLED.value, error="任务已取消")
         except Exception as e:
+            _end_task_span(begun, "error", str(e), input_payload=task_input)
             update_status(task_id, TaskStatus.FAILED.value, error=str(e))
+        else:
+            # 正常返回 = 图执行未抛异常（含走到 WAITING_REVIEW 人工审核 interrupt）
+            _end_task_span(begun, "ok", input_payload=task_input)
         finally:
             _ACTIVE.discard(task_id)
             _cleanup_if_terminal(task_id)  # 终态即清 checkpoint（T4.3-2）
 
-    asyncio.create_task(_go())
+    # context=全新 Context：任务不继承调用方的 contextvar（trace_id/obs span），见 _go 注释
+    asyncio.create_task(_go(), context=contextvars.Context())
 
 
 def resume_task(task_id: int, reviews: list) -> bool:
@@ -340,14 +427,19 @@ STALE_ORPHAN_MINUTES = 60
 
 
 def _sanitize_filename(name: str | None) -> str:
-    """上传文件名清洗（T4.3-8）：None→""、超 255 时保留扩展名截断主干
+    """上传文件名清洗（T4.3-8）：None→""、**先剥路径**、超 255 时保留扩展名截断主干
     （DB VARCHAR(255)，防 DataError 1406；存储路径用 sha，截断只影响展示名）。
+
+    **剥路径（F3）**：multipart 里 filename 由客户端声明、后端原样信任（`api/files.py:22`），
+    非浏览器的调用方（脚本/curl）常把整条相对或绝对路径塞进来，实测库里存过
+    `data/acceptance/good.pdf`。展示名只应是 basename，故统一按 `/` 与 `\\` 取末段。
 
     截断保留最后一个扩展名（a.tar.gz → a.tar 截主干 + .gz），展示一致性优先；
     无扩展名（或扩展名自身超长）时退化裸截断。后端自愈而非 422 拒绝——前端无长度提示。
     """
     if not name:
         return ""
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]   # 先剥路径，再判长度
     if len(name) <= FILE_NAME_MAX:
         return name
     dot = name.rfind(".")
@@ -567,20 +659,26 @@ def render_report(task_id: int, fmt: str):
 
 def list_tasks(status: str | None = None, file_name: str | None = None,
                page: int = 1, size: int = 10) -> dict:
-    """历史记录：分页 + 状态/文件名筛选（joinedload 防 N+1）。"""
+    """历史记录：分页 + 状态/文件名筛选（joinedload 防 N+1）。
+
+    F3：展示名取 task 自己的 `original_name`（本次上传声明的名字），为空时（存量行）回退
+    `contract_file.file_name`。筛选与展示必须走**同一表达式**，否则会出现「筛得到却看不出来」。
+    """
     with SessionLocal() as db:
         q = db.query(CheckTask).options(joinedload(CheckTask.contract_file))
         if status:
             q = q.filter(CheckTask.status == status)
         if file_name:
-            q = q.join(ContractFile).filter(ContractFile.file_name.like(f"%{file_name}%"))
+            q = q.join(ContractFile).filter(
+                func.coalesce(func.nullif(CheckTask.original_name, ""),
+                              ContractFile.file_name).like(f"%{file_name}%"))
         total = q.count()
         items = q.order_by(CheckTask.id.desc()).offset((page - 1) * size).limit(size).all()
     return {
         "total": total, "page": page, "size": size,
         "items": [{
             "id": t.id, "status": t.status, "extraction_status": t.extraction_status,
-            "file_name": t.contract_file.file_name,
+            "file_name": t.original_name or t.contract_file.file_name,
             "create_time": t.create_time.isoformat() if t.create_time else None,
         } for t in items],
     }
@@ -668,8 +766,9 @@ def save_uploaded_file(original_name: str | None, ext: str, file_type: str, data
             else:
                 db.refresh(cf)
 
-        # 创建校验任务并后台启动图执行
-        task = CheckTask(contract_file_id=cf.id, status=TaskStatus.PENDING.value, progress=0)
+        # 创建校验任务并后台启动图执行（F3：本次上传的文件名写在本 task 上，不随 sha 去重被复用）
+        task = CheckTask(contract_file_id=cf.id, original_name=_sanitize_filename(original_name),
+                         status=TaskStatus.PENDING.value, progress=0)
         db.add(task)
         db.commit()
         db.refresh(task)

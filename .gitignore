@@ -1,6 +1,11 @@
 # 本地配置（含 API key），禁止提交
 **/.env
 .env
+# .env 的派生名（.env.c1bak / .env.bak / .env.old 等）同样是明文凭据，整类挡掉。
+# 用通配而非逐个枚举文件名：本案的 `.env.c1bak` 就是 cp -r 派生出来的，
+# 枚举法会一直漏。模板必须显式放行（backend/.env.example 是已跟踪文件）。
+.env.*
+!.env.example
 # 本机端口覆盖（8088/8003），随本机环境不入库
 docker-compose.override.yml
 

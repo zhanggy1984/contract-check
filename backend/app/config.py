@@ -35,6 +35,20 @@ class Settings(BaseSettings):
     # 任务并发上限：同时运行的图流水线数（asyncio.Semaphore 排队，防连传打爆 LLM 限流）
     max_concurrent_tasks: int = 3
 
+    # ---------- 观测上报 obs_sdk（观测边带；缺开关/地址/主题三项任一项 = 完全关闭，业务零侵入） ----------
+    obs_enabled: bool = False
+    obs_kafka_servers: str = ""            # 如 localhost:39092（容器内 kafka:9092）
+    obs_kafka_topic: str = ""              # {env}.obs.agent.contract-check
+    obs_kafka_sasl_username: str = ""      # 生产 SASL；空 = PLAINTEXT（dev 无鉴权）
+    obs_kafka_sasl_password: str = ""
+    obs_flush_batch: int = 500
+    obs_flush_interval_s: float = 2.0
+
+    @property
+    def obs_ready(self) -> bool:
+        """观测三要素齐备才视为启用（防半配误开）。"""
+        return bool(self.obs_enabled and self.obs_kafka_servers and self.obs_kafka_topic)
+
     # 工具决策（function calling 决策引擎，见 app/graph/decisions.py）
     tool_decision_enabled: bool = True            # 决策引擎总开关（False = 零决策调用，回退旧行为）
     ocr_decision_enabled: bool = True             # OCR 决策点开关

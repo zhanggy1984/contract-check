@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from openai import LengthFinishReasonError
 
 from app.config import settings
+from app.obs import llm_start, record_llm_error, record_llm_ok
 
 
 @dataclass(frozen=True)
@@ -101,8 +102,20 @@ def call_with_tools(system: str, user: str, tools: list[dict]) -> ToolResponse:
     异常（网络/限流/解析）向上抛，由 decisions.py 兜底记录 fallback_error。
     """
     llm = _decision_model()
+    started = llm_start()  # LLM 出口观测计时（§11.3 cc #3；决策通道单次打点，多轮由 decisions.py 循环）
     try:
-        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)], tools=tools)
-    except LengthFinishReasonError as e:
-        return _parse_openai_completion(e.completion)
-    return _parse_aimessage(resp)
+        try:
+            resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)],
+                              tools=tools)
+        except LengthFinishReasonError as e:
+            out = _parse_openai_completion(e.completion)
+            record_llm_ok(started, out.usage)  # length 截断恢复为可用决策 → 计成功
+            return out
+        out = _parse_aimessage(resp)
+    except Exception as e:
+        # 网络/超时/限流/服务端：异常原样上抛（decisions.py fallback_error 兜底记录），
+        # 此处先记 error 再抛（§2.4 前提，失败率不丢、不吞不改异常）
+        record_llm_error(started, e)
+        raise
+    record_llm_ok(started, out.usage)
+    return out

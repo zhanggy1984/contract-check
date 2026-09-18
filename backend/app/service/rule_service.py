@@ -202,7 +202,12 @@ def update_rule(db, rule_id: int, data: dict) -> CheckRule | None:
         if "severity" in data:
             rule.severity = data["severity"]
     else:
-        for k in ("enabled", "severity", "expression", "description", "rule_name", "aggregation"):
+        # F6：请求体键是 name（与 CreateBody 同口径），ORM 属性却叫 rule_name，
+        # 必须显式映射。此前把 "rule_name" 直接混在下面的遍历里，而唯一调用方
+        # api/rules.py 发的是 name ⇒ 该键恒不在 data 中，改名静默不生效。
+        if data.get("name") is not None:
+            rule.rule_name = data["name"]
+        for k in ("enabled", "severity", "expression", "description", "aggregation"):
             if k in data and data[k] is not None:
                 setattr(rule, k, data[k])
     db.commit()
