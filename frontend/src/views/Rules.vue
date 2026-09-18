@@ -54,9 +54,15 @@
 
     <!-- 编辑 / 新建抽屉 -->
     <el-drawer v-model="drawer" :title="editing ? '编辑规则' : '新建规则'" size="560px">
+      <!-- F7：后端 rule_service.update_rule 对本体规则只应用 enabled/severity，
+           其余字段静默丢弃；此前抽屉不区分 source，用户改完点保存会看到「保存成功」
+           但库里毫无变化。故本体规则打开时禁用不可改字段，只留 severity（enabled 在列表里另有按钮）。 -->
+      <p v-if="isOntology" class="dim" style="margin-bottom: 10px">
+        本体自动生成的规则为只读：仅「严重级别」可改；启停请用列表中的启用/失效按钮。
+      </p>
       <el-form label-width="90px">
         <el-form-item label="规则名称">
-          <el-input v-model="form.rule_name" />
+          <el-input v-model="form.rule_name" :disabled="isOntology" />
         </el-form-item>
         <el-form-item label="严重级别">
           <el-radio-group v-model="form.severity">
@@ -70,17 +76,18 @@
             v-model="form.expression"
             type="textarea"
             :rows="10"
+            :disabled="isOntology"
             :placeholder="form.rule_type === 'SEMANTIC' ? '语义校验 prompt，要求返回 pass/reason/evidence/applicable' : 'SPARQL 反例查询'"
           />
         </el-form-item>
         <el-form-item label="聚合方式" v-if="form.rule_type === 'SEMANTIC'">
-          <el-radio-group v-model="form.aggregation">
+          <el-radio-group v-model="form.aggregation" :disabled="isOntology">
             <el-radio-button value="any">any（任一命中即报）</el-radio-button>
             <el-radio-button value="all">all（全部段缺失才报）</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="2" />
+          <el-input v-model="form.description" type="textarea" :rows="2" :disabled="isOntology" />
         </el-form-item>
 
         <!-- 示例与讲解：降低新规则上手门槛。注意内容必须直接放在 collapse-item 内，
@@ -139,6 +146,7 @@ const total = ref(0)
 const drawer = ref(false)
 const editing = ref(false)
 const saving = ref(false)
+const isOntology = ref(false)   // F7：本体规则只读（仅 severity 可改），见抽屉内说明
 const form = reactive({})
 
 const runDrawer = ref(false)
@@ -167,6 +175,7 @@ function load(page) {
 
 function openCreate() {
   editing.value = false
+  isOntology.value = false
   Object.assign(form, {
     rule_name: '', rule_type: 'SEMANTIC', severity: 'MEDIUM',
     expression: '', aggregation: 'any', description: '',
@@ -176,6 +185,7 @@ function openCreate() {
 
 function openEdit(row) {
   editing.value = true
+  isOntology.value = row.source === 'ONTOLOGY_GENERATED'
   Object.assign(form, { ...row })
   drawer.value = true
 }
