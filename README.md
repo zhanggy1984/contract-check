@@ -6,7 +6,7 @@
 
 - **做什么**：把合同原文变成"可复核、可追溯、有依据"的审查结论。上传合同 → 自动抽取结构化数据 → 本体规则 + 大模型双重校验 → 人工审核闭环 → 输出 PDF/Excel 报告，全程留痕可审计。
 - **怎么做**：**本体单一事实源**驱动抽取 Schema 与校验规则（换本体即换 schema + 规则集）→ **混合校验**（SPARQL 确定性抓字段级 + LLM 语义带原文证据抓条款级）→ **LangGraph 官方 HITL** 人工确认决定终态；文档解析全本地（拒绝外部解析 API），合同内容仅外发 DeepSeek（唯一对外通道）。
-- **好在哪**：结论有据可查（语义证据强制原文精确子串）、判定口径可复现（规则版本化可回溯）、人工确认决定终态（不误判不裸判）、393 项单元测试全绿 + B.4 评测契约对接标准平台，生产级一键部署。
+- **好在哪**：结论有据可查（语义证据强制原文精确子串）、判定口径可复现（规则版本化可回溯）、人工确认决定终态（不误判不裸判）、433 项单元测试全绿 + B.4 评测契约对接标准平台，生产级一键部署。
 - **稳在哪**：接入统一可观测 SDK——流水线每个节点、每次 LLM 调用落结构化事件（`trace_id` / `seq` / `interface` / `status` / `error_type` / `duration_ms` / `usage`），并接进平台「观测 → 聚类 → 组装 → 拉取 → 判定 → 回归回推 → 收口」的错误回流闭环，线上出过的错自动固化成回归用例；抽取阶段的并发缺陷（多个任务复用同一个 `contextvars.Context` 导致偶发 `INTERNAL_ERROR`）已定位、修复并复验。
 
 ## 目录
@@ -347,7 +347,7 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 | 解析 | PyMuPDF + python-docx + PaddleOCR 3.x | PDF / Word / 扫描件，置信度阈值 + 失败降级 |
 | 前端 | Vue3 + Vite + Element Plus + axios | 轮询任务状态 |
 | 报告 | reportlab + openpyxl | PDF（中文字体 bundle）/ Excel 导出 |
-| 测试 | unittest | backend 393 项全绿 |
+| 测试 | unittest | backend 433 项全绿 |
 
 ---
 
@@ -400,7 +400,7 @@ contract-check/
 │   │   └── common/ config/   # 常量 / 配置（pydantic-settings）
 │   ├── rules/manual/         # 人工规则：3 条 SPARQL（缺甲方/缺乙方/终止早于生效）
 │   │                          #           + 4 条语义 JSON（缺违约条款/权利义务不对等/技术标准/单方签署）
-│   ├── tests/                # 393 项单元测试
+│   ├── tests/                # 433 项单元测试
 │   ├── scripts/              # 验收/冒烟/PDF 生成/备份脚本
 │   ├── requirements*.txt / Dockerfile / entrypoint.sh / fonts/
 ├── frontend/                 # 前端（Vue3 + Vite + Element Plus）
@@ -426,7 +426,7 @@ contract-check/
 
 ## 九、测试与验收
 
-### 单元测试（393 项全绿）
+### 单元测试（433 项全绿）
 
 ```bash
 cd backend
