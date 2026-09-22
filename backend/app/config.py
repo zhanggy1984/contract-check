@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     obs_kafka_sasl_password: str = ""
     obs_flush_batch: int = 500
     obs_flush_interval_s: float = 2.0
+    # 观测上报的 agent 版本（§11.3）：消费方按 agent 名 + 版本区分同一 agent 的不同发布。
+    # 该键原先只存在于 .env、Settings 无对应字段，而 BaseSettings 默认 extra="forbid"，
+    # 导致 Settings() 实例化即抛 ValidationError、服务无法启动——故必须显式声明。
+    agent_version: str = "0.1.0"
 
     @property
     def obs_ready(self) -> bool:

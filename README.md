@@ -322,6 +322,18 @@ python data/gen_demo_contracts.py   # 11 个场景演示合同 → data/test-con
 - `GET /api/tasks/{id}/result`：同步 JSON 契约，透出 `answer`（校验摘要，失败/取消也有语义补全）、`usage`（LLM token 全字段聚合）、`timing`（start/end，同步接口不测首字）、`tool_calls`（规则命中明细全量，含 PASS / SKIPPED）、`meta`（agent/model/interface/contract_version）；
 - 配套 `verify_cc_*` 评测脚本与 `gen_cc_*` 变体合同生成器，覆盖单方签署缺陷形态、合法签署边界、电子签章等场景。
 
+### 12. 提示词外置
+4 个 system prompt 从 Python 字符串字面量外置为 `backend/app/prompts/*.md`（`extractor_system` / `semantic_system` / `ocr_decision_system` / `extract_retry_decision_system`），由 `prompts/__init__.py` 的 `load_prompt(name)` 按名读取、**原样返回不做插值**，调用点收成模块级 `SYSTEM_PROMPT = load_prompt("x")`——模板缺失时 import 即失败，不会静默退化成空 prompt。这些 `.md` 纳入 Git 版本控制：可 diff、可追溯、可按提交回滚，改文案不必动代码。
+
+**哪些适合外置、哪些不适合**：只外置了 system prompt——它们是纯文案，加载即可用。用户消息模板留在原地：`_build_prompt` 现场拼 f-string，还要循环遍历规则列表、调 `guard_text()` / `json.dumps()`，是「模板 + 逻辑」的混合体；外置它要么留着 f-string（等于没外置），要么把循环搬进模板（那文件就成了脚本而非模板）。也正因为 `load_prompt` 不跑插值，`semantic_system.md` 里的字面大括号（JSON 示例）零影响。
+
+**怎么证明它没坏**——验收落在"字节"上，而不是把新旧两段字符串摆一起肉眼看：
+- 要求外置后的 `.md` 与原字面量**逐字节相等**：4 个模板分别为 740 / 787 / 1672 / 1293 字节，与各自原常量精确相等；
+- 比对对象是**函数产出而非字面量**：把 HEAD 版文件加载成独立模块，对 4 个 system prompt 常量与两个参数化 builder（`_build_prompt` 的 texts × schemas × feedbacks 边界组合：空串、空 dict、空列表、feedback=None、缺 title 键等）逐项比对产出并核 sha256；既有 `test_injection.py` 的 golden 约束断言（模板正文关键约束行逐字保留）改造后仍全绿；
+- 落盘字节由 `.gitattributes` 锁 `backend/app/prompts/*.md` 为 LF——让「文件字节」跨平台确定，是上述字节级比对可复现的前提（loader 走 `read_text(encoding="utf-8")` 会做换行归一化，故这条不是修某个已知缺陷，而是钉住"字节即验收基准"这个不变量）。
+
+**回滚口径（如实）**：模板经 Dockerfile `COPY app ./app` 打进镜像，改提示词须重建镜像生效；回滚 = 切回旧提交后**重新构建并发布**，不是热回滚。
+
 ---
 
 ## 六、技术栈一览
